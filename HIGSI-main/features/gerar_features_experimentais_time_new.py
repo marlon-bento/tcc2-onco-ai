@@ -24,7 +24,7 @@ PASTA_FEATURES = config("PASTA_FEATURES")
 if not ARQUIVO_MANIFEST or not PASTA_IMAGENS or not PASTA_FEATURES:
     raise ValueError("ERRO: Verifique as variáveis de caminho no arquivo .env.")
 
-LISTA_MAX_DIM = [256]
+LISTA_MAX_DIM = [256, 512, 1024] #None -> tamanho original da imagem
 LISTA_N_NODES = [15]
 #1024
 # --- FUNÇÃO AUXILIAR PARA FORMATAR O TEMPO ---

@@ -173,7 +173,95 @@ class BRM_GATConv(torch.nn.Module):
         return x 
 
 
+# self, node_feature_size, num_classes, edge_feature_size, embedding_size=64, dropout_gnn=0.0, dropout_classifier=0.0
 
+class HIGSI(torch.nn.Module):
+    def __init__(self, node_feature_size, num_classes, edge_feature_size, embedding_size=64, dropout_gnn=0.0, dropout_classifier=0.0):
+        super(HIGSI, self).__init__()
+        
+        self.edge_emb = Linear(edge_feature_size, embedding_size)
+        self.conv1 = GatedGCNLayer(in_dim=embedding_size,
+                                    out_dim=embedding_size,
+                                    dropout=0.,  # Dropout is handled by GraphGym's `GeneralLayer` wrapper
+                                    residual=True,  # Residual connections are handled by GraphGym's `GNNStackStage` wrapper
+                                    equivstable_pe=False)
+        self.bn11 = LayerNorm(in_channels=embedding_size)
+        self.bn12 = LayerNorm(in_channels=embedding_size)
+        self.bn13 = LayerNorm(in_channels=embedding_size)
+
+        self.linear_trans11 = Linear(node_feature_size, embedding_size)
+        self.linear_trans12 = Linear(embedding_size, embedding_size)
+     
+        self.conv2 = GatedGCNLayer(in_dim=embedding_size,
+                                    out_dim=embedding_size,
+                                    dropout=0.,  # Dropout is handled by GraphGym's `GeneralLayer` wrapper
+                                    residual=True,  # Residual connections are handled by GraphGym's `GNNStackStage` wrapper
+                                    equivstable_pe=False)
+        self.bn21 = LayerNorm(in_channels=embedding_size)
+        self.bn22 = LayerNorm(in_channels=embedding_size)
+        self.bn23 = LayerNorm(in_channels=embedding_size)
+
+        self.linear_trans21 = Linear(embedding_size, embedding_size)
+        self.linear_trans22 = Linear(embedding_size, embedding_size)
+
+        self.conv3 = GatedGCNLayer(in_dim=embedding_size,
+                                    out_dim=embedding_size,
+                                    dropout=0.,  # Dropout is handled by GraphGym's `GeneralLayer` wrapper
+                                    residual=True,  # Residual connections are handled by GraphGym's `GNNStackStage` wrapper
+                                    equivstable_pe=False)
+        self.bn31 = LayerNorm(in_channels=embedding_size)
+        self.bn32 = LayerNorm(in_channels=embedding_size)
+        self.bn33 = LayerNorm(in_channels=embedding_size)
+
+        self.linear_trans31 = Linear(embedding_size, embedding_size)
+        self.linear_trans32 = Linear(embedding_size, embedding_size)
+
+        self.graph_size_norm = GraphSizeNorm()
+        self.class1 = Linear(embedding_size, 256)
+        self.class2 = Linear(256, num_classes)
+        
+    def forward(self, x, edge_index, edge_attr, batch_index, graph_index, reduced_index):
+        #First Block
+        edge_attr = self.edge_emb(edge_attr)
+    
+        x = self.linear_trans11(x)
+        x = self.bn11(x) 
+        x, edge_attr = self.conv1(x, edge_index, edge_attr)
+        x = self.bn12(x)
+        x = self.linear_trans12(x)
+        x = self.bn13(x)
+
+        # Second block
+        x = self.linear_trans21(x)
+        x = self.bn21(x) 
+        x, edge_attr = self.conv2(x, edge_index, edge_attr)
+        x = self.bn22(x)
+        x = self.linear_trans22(x)
+        x = self.bn23(x)
+    
+        #Third block
+        x = self.linear_trans31(x)
+        x = self.bn31(x) 
+        x, edge_attr = self.conv3(x, edge_index, edge_attr)
+        x = self.bn32(x)
+        x = self.linear_trans32(x)
+        x = self.bn33(x)
+
+        x = F.relu(self.class1(x))
+        
+        x = self.graph_size_norm(x,graph_index)
+        x=gdp(x,graph_index)
+        exp=torch.exp(x)
+        numerator=exp.sum(dim=1, keepdim=True)
+        denominator=gdp(numerator,reduced_index).sum(dim=1, keepdim=True)
+        exp_denominator=denominator.index_select(dim=0, index=reduced_index)
+        alpha=numerator/exp_denominator
+        x=x*alpha
+
+        x = gdp(x, reduced_index)
+            
+        x = self.class2(x)
+        return x
 
 
 

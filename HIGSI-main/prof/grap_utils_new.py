@@ -4,6 +4,7 @@ import cv2
 import imageio
 import torch
 import numpy as np
+import higra as hg
 from PIL import Image
 import networkx as nx
 import matplotlib.pyplot as plt
@@ -306,3 +307,176 @@ def RAG(image,n_nodes=6):
         i=i+1
     
     return h, edges.T, edge_features, h[:,11:13], super_pixel
+
+def MG_superpixel_hierarchy(image, n_nodes, canonized=True):
+    NUM_FEATURES=104
+
+    super_pixel = slic(image, n_segments=n_nodes, slic_zero=True, channel_axis=2)
+    label_img=super_pixel
+
+    asegments = np.array(label_img)
+    image_features = image
+    g = graph.rag_mean_color(image, label_img)
+
+    greyscale_image = cv2.cvtColor(image, cv2.COLOR_RGB2GRAY)
+    img_blur = cv2.GaussianBlur(greyscale_image, (3,3), sigmaX=0, sigmaY=0) 
+    canny = cv2.Canny(image=img_blur, threshold1=100, threshold2=200) 
+    
+    superpixel_graph = hg.UndirectedGraph()       #convert the scikit image rag to higra unidrect graph
+    superpixel_graph.add_vertices(max(g._node))   #creating the nodes (scikit image RAG starts from 1)
+    edge_list = list(g.edges())                   #ScikitRAG edges
+    for i in range (len(edge_list)):
+        superpixel_graph.add_edge(edge_list[i][0]-1, edge_list[i][1]-1) #Adding the nodes to higra graph
+    edge_weights = np.empty(shape=len(edge_list))
+    sources, targets = superpixel_graph.edge_list()
+    for i in range (len(sources)):
+        edge_weights[i] = int(g.adj[sources[i]+1][targets[i]+1]["weight"])
+
+    if(not canonized):
+        nb_tree, nb_altitudes = hg.watershed_hierarchy_by_area(superpixel_graph, edge_weights, canonize_tree=False)
+        tree, node_map = hg.tree_2_binary_tree(nb_tree)
+        altitudes = nb_altitudes[node_map]
+    else:
+        nb_tree, nb_altitudes = hg.watershed_hierarchy_by_area(superpixel_graph, edge_weights, canonize_tree=True)
+        tree = nb_tree
+        altitudes = nb_altitudes
+    #               CREATE THE COO MATRIX                       #
+    n_edges = tree.root()
+    num_nodes = np.max(tree.root()+1) #número de vértices
+    nodes = { #inicializa a lista de vértices
+        node: {
+            "rgb_list": [],
+            "pos_list": [],
+            "altitude": 0,
+            "histogram": np.zeros((8,)),
+            "props_features": np.zeros((22,)),
+            "texture_features": np.zeros((68,)),
+            "regions": [],
+            "adj":[],
+        } for node in range(num_nodes)
+    }
+    height = image.shape[0] #altura da imagem   
+    width = image.shape[1]  #largura da imagem
+    mask_n=0
+    #percorre os vertices que que sao superpixels
+    for y in range(height):
+        for x in range(width):
+            node = asegments[y,x]-1
+            rgb = image_features[y,x,:]
+            pos = np.array([float(x),float(y)])
+            nodes[node]["rgb_list"].append(rgb) #adiciona a informação de cor referente a cada pixel do superpixel
+            nodes[node]["pos_list"].append(pos) #adiciona a informação de posição referente a cada pixel do superpixel
+            
+    for n in tree.leaves_to_root_iterator():
+        if(not tree.is_leaf(n)): #
+            # regions = []
+            nodes[n]["altitude"] = altitudes[n]
+            for i in tree.children(n): # percorre todos os filhos
+                nodes[n]["rgb_list"].extend(nodes[i]["rgb_list"]) #adiciona a informação de cor referente a cada pixel do superpixel
+                nodes[n]["pos_list"].extend(nodes[i]["pos_list"]) #adiciona a informação de posição referente a cada pixel do superpixel
+                nodes[n]["histogram"] += nodes[i]["histogram"]         
+                nodes[n]["regions"].extend(list(set(nodes[i]["regions"]) - set(nodes[n]["regions"])))
+                nodes[n]["adj"].extend(list(set(nodes[i]["adj"]) - set(nodes[n]["adj"])))
+            mask = np.zeros(asegments.shape)
+            for j in nodes[n]["regions"]:
+                mask += np.where(asegments==j, 255, 0)
+            
+            nodes[n]["texture_features"] = texture_features(greyscale_image, mask, canny)
+            nodes[n]["props_features"] = mask_to_bbox(mask, image_features, mask_n, False)
+            mask_n+=1
+        else: #é um vértice folha (somente suas próprias features)
+            nodes[n]["altitude"] = altitudes[n]
+            nodes[n]["histogram"] = get_histogram(image_features, np.where(asegments==n+1, 255, 0))
+            nodes[n]["props_features"] = mask_to_bbox(np.where(asegments==n+1, 255, 0), image_features, mask_n, False)
+            nodes[n]["texture_features"] = texture_features(greyscale_image, np.where(asegments==n+1, 255, 0), canny)
+            nodes[n]["regions"].extend([n+1])
+            nodes[n]["adj"].extend(list(g.adj[n+1].keys()))
+            mask_n+=1
+            
+
+    
+    h = np.zeros([num_nodes,NUM_FEATURES]).astype(NP_TORCH_FLOAT_DTYPE)
+    G = nx.Graph()
+
+    for node in nodes:
+        nodes[node]["rgb_list"] = np.stack(nodes[node]["rgb_list"])
+        nodes[node]["pos_list"] = np.stack(nodes[node]["pos_list"])
+        # rgb
+        rgb_mean = np.mean(nodes[node]["rgb_list"], axis=0) #média de RGB
+        pos_mean = np.mean(nodes[node]["pos_list"], axis=0) #média da posição dos pixels pertecentes ao superpixel
+        features = np.concatenate(  #shape = (159,)
+        [
+            np.reshape(rgb_mean, -1),   #3 features (1 para cada canal)
+            nodes[node]["histogram"],
+            np.reshape(nodes[node]["altitude"],-1),
+            np.reshape(pos_mean, -1),   #2 features (1 para cada eixo)
+            nodes[node]["texture_features"],
+            nodes[node]["props_features"],
+        ]
+        )
+        G.add_node(node, features = list(features))
+
+    for j in G.nodes:
+        h[j,:] = G.nodes[j]["features"]
+    del G
+    
+     
+    i=0       
+    graph_index = np.zeros([len(nodes)]).astype(NP_TORCH_LONG_DTYPE)
+    edges_rag = len(list(g.edges()))
+    edges = np.zeros([(2*(n_edges)) + (2*edges_rag),2]).astype(NP_TORCH_LONG_DTYPE)
+    edge_features = np.zeros((edges.shape[0],1)).astype(NP_TORCH_FLOAT_DTYPE)    
+    for e,(s,t) in enumerate(edge_list):
+        graph_index[s-1]=0
+        graph_index[t-1]=0 
+        dist=np.linalg.norm(h[s-1]-h[t-1])
+        edges[i,0] = s-1
+        edges[i,1] = t-1
+        edge_features[i] = dist
+        i=i+1
+        edges[i,0] = t-1
+        edges[i,1] = s-1
+        edge_features[i] = dist
+        i=i+1    
+                                                           
+    for n in tree.leaves_to_root_iterator(): 
+        if(n != tree.root()):     
+            dist = np.linalg.norm(h[n] - h[tree.parent(n)])
+            edges[i,0] = n                                      
+            edges[i,1] = tree.parent(n) 
+            edge_features[i] = dist #math.exp(-(dist/(mean**2)))                         
+            i=i+1                                               
+            edges[i,0] = tree.parent(n)                         
+            edges[i,1] = n
+            edge_features[i] = dist # math.exp(-(dist/(mean**2)))                                       
+            i=i+1
+    graph_count=1
+    explorer = hg.HorizontalCutExplorer(tree, altitudes)
+    cut_edges = np.zeros([1,2]).astype(NP_TORCH_LONG_DTYPE)
+    for z in range(explorer.num_cuts()): #cortes presente na árvore de segmentação        
+        cut_nodes = explorer.horizontal_cut_from_index(z).nodes()
+        for v in cut_nodes:
+            if(graph_index[v]==0):
+                graph_index[v]=graph_count
+        graph_count+=1
+        if(len(cut_nodes)>1):
+            # cut = explorer.horizontal_cut_from_index(z)
+            # c = cut.graph_cut(tree)
+            # cut_rag = hg.make_region_adjacency_graph_from_graph_cut(superpixel_graph, c)
+            # sources, targets = cut_rag.edge_list()
+            # for i in range (len(sources)):
+            #     dist = np.array([[np.linalg.norm(h[cut_nodes[sources[i]]] - h[cut_nodes[targets[i]]])]]).astype(NP_TORCH_FLOAT_DTYPE)
+            #     edges = np.append(edges, np.array([[cut_nodes[sources[i]],cut_nodes[targets[i]]]]).astype(NP_TORCH_LONG_DTYPE), axis=0)
+            #     edge_features = np.append(edge_features, dist, axis=0)
+            #     edges = np.append(edges, np.array([[cut_nodes[targets[i]], cut_nodes[sources[i]]]]).astype(NP_TORCH_LONG_DTYPE), axis=0)
+            #     edge_features = np.append(edge_features, dist, axis=0)
+            for i in range (len(cut_nodes)):
+                for j in range (len(cut_nodes)-(i+1)):
+                    if(any(x in nodes[cut_nodes[i]]["adj"] for x in nodes[cut_nodes[j+(i+1)]]["regions"])):
+                        dist = np.array([[np.linalg.norm(h[cut_nodes[i]] - h[cut_nodes[j+(i+1)]])]]).astype(NP_TORCH_FLOAT_DTYPE)
+                        edges = np.append(edges, np.array([[cut_nodes[i],cut_nodes[j+(i+1)]]]).astype(NP_TORCH_LONG_DTYPE), axis=0)
+                        edge_features = np.append(edge_features, dist, axis=0)
+                        edges = np.append(edges, np.array([[cut_nodes[j+(i+1)],cut_nodes[i]]]).astype(NP_TORCH_LONG_DTYPE), axis=0)
+                        edge_features = np.append(edge_features, dist, axis=0)
+                        
+    return h, edges.T, edge_features, h[:,3:], graph_index, np.zeros(graph_count), np.array([graph_count])
