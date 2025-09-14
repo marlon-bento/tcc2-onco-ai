@@ -28,7 +28,7 @@ scikit-image==0.25.2
 # MLOps e Banco de Dados
 mlflow==3.3.2
 alembic==1.16.5
-SQLAlchemy==2.0.43 # Boa prática especificar junto com Alembic
+SQLAlchemy==2.0.43 
 
 # Utilitários
 GitPython==3.1.45

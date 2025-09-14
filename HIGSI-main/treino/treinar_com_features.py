@@ -25,7 +25,7 @@ if not PASTA_FEATURES:
 # ==============================================================================
 # conjunto de features
 MAX_DIM_A_TESTAR = 1024
-N_NODES_A_TESTAR = 25  
+N_NODES_A_TESTAR = 100  
 
 # Parâmetros de Treinamento
 EPOCHS = 150
@@ -136,18 +136,7 @@ def resgata_dados_treinamento(dim_folder_name):
     print("Iniciando Experimento com MLFlow")
     print(f"  - Carregando features de: {ARQUIVO_GRAFOS_PRONTOS}")
     return torch.load(ARQUIVO_GRAFOS_PRONTOS, weights_only=False)
-
-def main():
-    patience_counter = 0
-
-    device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
-    
-    # --- 2. CARREGAR E DIVIDIR OS DADOS ---
-    dim_folder_name = "original" if MAX_DIM_A_TESTAR is None else str(MAX_DIM_A_TESTAR)
-
-    lista_grafos = resgata_dados_treinamento(dim_folder_name)
-    
-
+def normalizar_features(lista_grafos):
     from sklearn.preprocessing import StandardScaler
 
     # --- NORMALIZAÇÃO DE FEATURES ---
@@ -163,7 +152,19 @@ def main():
     for data in lista_grafos:
         data.x = torch.from_numpy(scaler.transform(data.x.numpy())).float()
     print("Normalização concluída.")
-    # --- FIM DO NOVO BLOCO ---
+    return lista_grafos
+def main():
+    patience_counter = 0
+
+    device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+    
+    # --- 2. CARREGAR E DIVIDIR OS DADOS ---
+    dim_folder_name = "original" if MAX_DIM_A_TESTAR is None else str(MAX_DIM_A_TESTAR)
+
+    lista_grafos = resgata_dados_treinamento(dim_folder_name)
+    
+
+    lista_grafos = normalizar_features(lista_grafos)
 
     # Agora o código de divisão de dados continua 
     # labels = [g.y.item() for g in lista_grafos]
