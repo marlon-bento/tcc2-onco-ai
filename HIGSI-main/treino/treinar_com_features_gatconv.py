@@ -11,8 +11,7 @@ from torch_geometric.loader import DataLoader
 from sklearn.model_selection import train_test_split
 from sklearn.metrics import accuracy_score, classification_report
 from collections import Counter
-from sklearn.utils.class_weight import compute_class_weight
-
+from sklearn.preprocessing import StandardScaler
 
 from prof.model import BRM_GATConv 
 
@@ -25,25 +24,26 @@ if not PASTA_FEATURES:
 # ==============================================================================
 # --- PAINEL DE CONTROLE DO EXPERIMENTO ---
 # ==============================================================================
-MAX_DIM_A_TESTAR = 512
-N_NODES_A_TESTAR = 200
+MAX_DIM_A_TESTAR = 1024
+N_NODES_A_TESTAR = 100
 
 # Parâmetros de Treinamento
 EPOCHS = 150
 BATCH_SIZE = 16
 LEARNING_RATE = 0.001 
 RANDOM_SEED = 42
-TEST_SPLIT_SIZE = 0.10
-VAL_SPLIT_SIZE = 0.10
+TEST_SPLIT_SIZE = 0.10 # % para teste
+VAL_SPLIT_SIZE = 0.10   # % para validação (do que sobrar do treino)
 NUM_CLASSES = 2
 
-# Parâmetros do Modelo
+# Parâmetros do Modelo GATConv
 EMBEDDING_SIZE = 200 
-HEADS = 4 
+HEADS = 8 
 DROPOUT_GNN = 0.3 
 DROPOUT_CLASSIFIER = 0.3 
 EARLY_STOPPING_PATIENCE = 30
-WEIGHT_DECAY = 5e-4 
+# usar 1e-3, 5e-4, 2e-3
+WEIGHT_DECAY = 1e-3
 # ==============================================================================
 
 # --- Garantir Reprodutibilidade ---
@@ -104,18 +104,29 @@ def train(epoch, model, train_loader, optimizer, loss_fn, device):
     avg_loss = total_loss / len(train_loader)
     return avg_loss
 
-def main():
-    patience_counter = 0
-    device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
-    dim_folder_name = "original" if MAX_DIM_A_TESTAR is None else str(MAX_DIM_A_TESTAR)
+def salva_modelo_treinado(dim_folder_name):
+    """Gera o caminho para salvar o modelo e cria o diretório se necessário."""
+    diretorio_do_script = os.path.dirname(os.path.abspath(__file__))
+    save_dir = os.path.join(
+        diretorio_do_script, 
+        "weights", 
+        f"BRM_GATConv_{dim_folder_name}_{N_NODES_A_TESTAR}_seed{RANDOM_SEED}.pth"
+    )
+    os.makedirs(os.path.dirname(save_dir), exist_ok=True)
+    return save_dir
+
+def resgata_dados_treinamento(dim_folder_name):
+    """Carrega a lista de grafos a partir do arquivo .pt."""
     ARQUIVO_GRAFOS_PRONTOS = os.path.join(PASTA_FEATURES, dim_folder_name, f'{N_NODES_A_TESTAR}.pt')
     if not os.path.exists(ARQUIVO_GRAFOS_PRONTOS):
         raise FileNotFoundError(f"ERRO: Arquivo de grafos '{ARQUIVO_GRAFOS_PRONTOS}' não encontrado.")
     print("="*60)
     print("Iniciando Experimento com MLFlow")
     print(f"  - Carregando features de: {ARQUIVO_GRAFOS_PRONTOS}")
-    lista_grafos = torch.load(ARQUIVO_GRAFOS_PRONTOS, weights_only=False)
-    from sklearn.preprocessing import StandardScaler
+    return torch.load(ARQUIVO_GRAFOS_PRONTOS, weights_only=False)
+
+def normalizar_features(lista_grafos):
+    """Normaliza as features dos nós de uma lista de grafos."""
     print("Normalizando as features dos nós...")
     all_node_features = torch.cat([data.x for data in lista_grafos], dim=0)
     scaler = StandardScaler()
@@ -123,33 +134,58 @@ def main():
     for data in lista_grafos:
         data.x = torch.from_numpy(scaler.transform(data.x.numpy())).float()
     print("Normalização concluída.")
+    return lista_grafos
+
+def main():
+    patience_counter = 0
+    device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+    
+    # --- CARREGAR E PREPARAR OS DADOS ---
+    dim_folder_name = "original" if MAX_DIM_A_TESTAR is None else str(MAX_DIM_A_TESTAR)
+    
+    lista_grafos = resgata_dados_treinamento(dim_folder_name)
+    lista_grafos = normalizar_features(lista_grafos)
+    
+    # --- DIVIDIR OS DADOS ---
     try:
         stratify_labels = [g.source for g in lista_grafos]
     except AttributeError:
+        print("AVISO: Atributo '.source' não encontrado para estratificação. Usando labels (y).")
         stratify_labels = [g.y.item() for g in lista_grafos]
+
     train_val_data, test_data = train_test_split(
         lista_grafos, test_size=TEST_SPLIT_SIZE, stratify=stratify_labels, random_state=RANDOM_SEED
     )
-    train_val_stratify_labels = [g.source for g in train_val_data]
+    
+    try:
+        train_val_stratify_labels = [g.source for g in train_val_data]
+    except AttributeError:
+        train_val_stratify_labels = [g.y.item() for g in train_val_data]
+
     val_split_adjusted = VAL_SPLIT_SIZE / (1.0 - TEST_SPLIT_SIZE)
     train_data, val_data = train_test_split(
         train_val_data, test_size=val_split_adjusted, stratify=train_val_stratify_labels, random_state=RANDOM_SEED
     )
     
+    # --- CONFIGURAR SAMPLER PARA DESBALANCEAMENTO (SE APLICÁVEL) ---
     print("\n" + "-"*60)
     print("--- Configurando o WeightedRandomSampler para o Treino ---")
-    train_sources = [g.source for g in train_data]
-    source_counts = Counter(train_sources)
-    print(f"Contagem das fontes no treino: {source_counts}")
-    source_weights = {source: 1.0 / count for source, count in source_counts.items()}
-    print(f"Pesos por fonte: {source_weights}")
-    sample_weights = [source_weights[source] for source in train_sources]
-    sample_weights = torch.DoubleTensor(sample_weights)
-    sampler = torch.utils.data.sampler.WeightedRandomSampler(sample_weights, len(sample_weights))
-    print("Sampler configurado.")
+    try:
+        train_sources = [g.source for g in train_data]
+        source_counts = Counter(train_sources)
+        print(f"Contagem das fontes no treino: {source_counts}")
+        source_weights = {source: 1.0 / count for source, count in source_counts.items()}
+        print(f"Pesos por fonte: {source_weights}")
+        sample_weights = [source_weights[source] for source in train_sources]
+        sampler = torch.utils.data.sampler.WeightedRandomSampler(torch.DoubleTensor(sample_weights), len(sample_weights))
+        train_loader = DataLoader(train_data, batch_size=BATCH_SIZE, sampler=sampler)
+        print("Sampler configurado e aplicado ao DataLoader de treino.")
+    except AttributeError:
+        print("Atributo '.source' não encontrado. Usando DataLoader padrão com shuffle.")
+        train_loader = DataLoader(train_data, batch_size=BATCH_SIZE, shuffle=True)
     print("-"*60)
     
-    train_loader = DataLoader(train_data, batch_size=BATCH_SIZE, sampler=sampler)
+    # --- CRIAR DATALOADERS ---
     val_loader = DataLoader(val_data, batch_size=BATCH_SIZE, shuffle=False)
     test_loader = DataLoader(test_data, batch_size=BATCH_SIZE, shuffle=False)
 
@@ -158,6 +194,7 @@ def main():
     print(f"Usando dispositivo: {device}")
     print("="*60)
 
+    # --- CONFIGURAR MODELO, OTIMIZADOR E MLFLOW ---
     model = BRM_GATConv(
         node_feature_size=train_data[0].num_node_features,
         edge_feature_size=train_data[0].num_edge_features,
@@ -170,19 +207,19 @@ def main():
 
     print(f"Número de parâmetros do modelo (GATConv): {count_parameters(model)}")
     
-    save_dir = f"weights/BRM_GATConv_{dim_folder_name}_{N_NODES_A_TESTAR}_seed{RANDOM_SEED}.pth"
-    os.makedirs(os.path.dirname(save_dir), exist_ok=True)
+    save_dir = salva_modelo_treinado(dim_folder_name)
     
     loss_fn = torch.nn.CrossEntropyLoss()
     optimizer = torch.optim.Adam(model.parameters(), lr=LEARNING_RATE, weight_decay=WEIGHT_DECAY)
     scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(optimizer, mode='max', patience=15, min_lr=1e-6, factor=0.5)
     
-    experiment_name = f"GATConv - ImgSize {dim_folder_name} - Nodes {N_NODES_A_TESTAR}" # Nome do experimento atualizado
+    experiment_name = f"GATConv - ImgSize {dim_folder_name} - Nodes {N_NODES_A_TESTAR}"
     mlflow.set_tracking_uri("http://127.0.0.1:5000")
     mlflow.set_experiment(experiment_name)
 
     best_val_accu = 0
 
+    # --- EXECUTAR O LOOP DE TREINAMENTO ---
     with mlflow.start_run() as run:
         mlflow.log_params({
             "model_type": "GATConv", "epochs": EPOCHS, "batch_size": BATCH_SIZE, 
@@ -196,12 +233,15 @@ def main():
         for epoch in range(EPOCHS):
             print(f"--- Época {epoch+1}/{EPOCHS} ---")
             train_loss = train(epoch=epoch, model=model, train_loader=train_loader, optimizer=optimizer, loss_fn=loss_fn, device=device)
-            print(f"Train Loss: {train_loss:.4f}")
             mlflow.log_metric(key="Loss-train", value=float(train_loss), step=epoch)
+            
             val_loss, val_accu = val(epoch=epoch, model=model, val_loader=val_loader, loss_fn=loss_fn, device=device, run_type="val")
-            print(f"Val Loss: {val_loss:.4f}")
             mlflow.log_metric(key="Loss-val", value=float(val_loss), step=epoch)
+            print(f"Train Loss: {train_loss:.4f} | Val Loss: {val_loss:.4f}")
+            
+            # Avaliação opcional no teste a cada época
             _, _ = val(epoch=epoch, model=model, val_loader=test_loader, loss_fn=loss_fn, device=device, run_type="test")
+            
             if val_accu > best_val_accu:
                 best_val_accu = val_accu
                 torch.save(model.state_dict(), save_dir)
@@ -210,6 +250,7 @@ def main():
                 print(f"✨ Novo melhor modelo salvo em '{save_dir}' com acurácia de validação: {best_val_accu:.4f}")
             else:
                 patience_counter += 1
+                
             if patience_counter >= EARLY_STOPPING_PATIENCE:
                 print(f"--- Parada antecipada na época {epoch+1} ---")
                 break 
@@ -217,7 +258,7 @@ def main():
     
     print("\n--- Treinamento Concluído ---")
     
-    # --- AVALIAÇÃO FINAL DO MELHOR MODELO GATConv ---
+    # --- AVALIAÇÃO FINAL DO MELHOR MODELO ---
     print("\n" + "="*60)
     print("Carregando o melhor modelo GATConv para avaliação final no conjunto de teste...")
     
@@ -226,10 +267,9 @@ def main():
         edge_feature_size=test_data[0].num_edge_features,
         num_classes=NUM_CLASSES,
         embedding_size=EMBEDDING_SIZE,
-        heads=HEADS,
-        dropout_gnn=DROPOUT_GNN,
-        dropout_classifier=DROPOUT_CLASSIFIER
+        heads=HEADS
     ).to(device)
+    
     best_model.load_state_dict(torch.load(save_dir, weights_only=True))
     best_model.eval()
 
@@ -241,10 +281,12 @@ def main():
             pred = out.argmax(dim=1)
             test_preds.extend(pred.cpu().tolist())
             test_labels.extend(data.y.cpu().tolist())
+            
     print("\n--- Relatório de Classificação Final (Melhor Modelo no Teste) ---")
     final_accuracy = accuracy_score(test_labels, test_preds)
     print(f"Acurácia Final no Teste: {final_accuracy:.4f}\n")
     print(classification_report(test_labels, test_preds, target_names=["Benigno (0)", "Maligno (1)"]))
+    
     final_metrics = classification_report(test_labels, test_preds, output_dict=True)
     if mlflow.active_run():
       mlflow.log_metric("final_test_accuracy", final_metrics['accuracy'])

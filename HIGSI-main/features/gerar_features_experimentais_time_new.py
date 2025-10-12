@@ -10,7 +10,7 @@ from torch_geometric.data import Data
 from dotenv import load_dotenv
 import os
 from prof.grap_utils_new import RAG
-
+from multiprocessing import Pool, cpu_count # Importa as ferramentas de paralelismo
 
 from decouple import config
 
@@ -20,27 +20,14 @@ from decouple import config
 ARQUIVO_MANIFEST = config("MANIFEST_FILE_PATH")
 PASTA_IMAGENS = config("DATASET_IMAGES_PATH")
 PASTA_FEATURES = config("PASTA_FEATURES")
-
+NUM_WORKERS = 1
 if not ARQUIVO_MANIFEST or not PASTA_IMAGENS or not PASTA_FEATURES:
     raise ValueError("ERRO: Verifique as variáveis de caminho no arquivo .env.")
 
-LISTA_MAX_DIM = [256]
-LISTA_N_NODES = [15]
+LISTA_MAX_DIM = [None]
+LISTA_N_NODES = [50]
 #1024
-# --- FUNÇÃO AUXILIAR PARA FORMATAR O TEMPO ---
-def formatar_tempo(segundos):
-    """Converte segundos para um formato legível (h, m, s)."""
-    horas = int(segundos // 3600)
-    minutos = int((segundos % 3600) // 60)
-    segundos = int(segundos % 60)
-    if horas > 0:
-        return f"{horas}h, {minutos}m e {segundos}s"
-    elif minutos > 0:
-        return f"{minutos}m e {segundos}s"
-    else:
-        return f"{segundos}s"
 
-# ==============================================================================
 def pre_processar_imagem(caminho_final_encontrado, max_dim):
     img_color = cv2.imread(caminho_final_encontrado)
     if img_color is None: return None
@@ -72,10 +59,44 @@ def pre_processar_imagem(caminho_final_encontrado, max_dim):
     # -----------------------------------------------
     
     return img_rgb_final
+
+# --- NOVA FUNÇÃO PARA O PARALELISMO ---
+def processar_e_gerar_grafo(args):
+    """
+    Função que será executada por cada worker no pool de processos.
+    Recebe os dados da linha do DataFrame e os parâmetros do experimento.
+    """
+    row, max_dim, n_nodes = args
+    caminho_relativo = row['image file path']
+    caminho_final_encontrado = None
+    partes_caminho = caminho_relativo.split('/')
+    
+    if len(partes_caminho) > 1:
+        nome_pasta = partes_caminho[-2]
+        pasta_do_exame = os.path.join(PASTA_IMAGENS, nome_pasta)
+        if os.path.isdir(pasta_do_exame):
+            arquivos = [f for f in os.listdir(pasta_do_exame) if f.lower().endswith(('.jpeg', '.jpg', '.png'))]
+            if arquivos:
+                caminho_final_encontrado = os.path.join(pasta_do_exame, arquivos[0])
+
+    if caminho_final_encontrado:
+        img_processada = pre_processar_imagem(caminho_final_encontrado, max_dim)
+        if img_processada is None:
+            return None
+        
+        # Gera o grafo
+        h_feat, edges, edge_feat, _, _ = RAG(img_processada, n_nodes=n_nodes)
+        
+        # Retorna o grafo gerado
+        return Data(
+            x=torch.tensor(h_feat, dtype=torch.float), edge_index=torch.tensor(edges, dtype=torch.long),
+            edge_attr=torch.tensor(edge_feat, dtype=torch.float), y=torch.tensor([row['label']], dtype=torch.long),
+            source=row['pathology'], image_file_path=row['image file path']
+        )
+    return None
+
 # --- BLOCO DE EXECUÇÃO ---
 def gerar_features():
-    # --- 2. DEFINIR O LOCALE PARA PORTUGUÊS DO BRASIL ---
-    # Isso garante que nomes de meses e dias da semana saiam em português.
     try:
         locale.setlocale(locale.LC_TIME, 'pt_BR.UTF-8')
     except locale.Error:
@@ -98,45 +119,7 @@ def gerar_features():
 
     if not experimentos_pendentes:
         print("🎉 Todos os experimentos já foram concluídos!")
-    else:
-        n_imagens_calibracao = min(5, len(df_manifest))
-        param_calibracao = experimentos_pendentes[-1]
-        
-        tempo_inicio_calibracao = time.time()
-        
-        for index, row in df_manifest.head(n_imagens_calibracao).iterrows():
-            caminho_relativo = row['image file path']
-            caminho_final_encontrado = None
-            partes_caminho = caminho_relativo.split('/')
-            if len(partes_caminho) > 1:
-                nome_pasta = partes_caminho[-2]
-                pasta_do_exame = os.path.join(PASTA_IMAGENS, nome_pasta)
-                if os.path.isdir(pasta_do_exame):
-                    arquivos = [f for f in os.listdir(pasta_do_exame) if f.lower().endswith(('.jpeg', '.jpg', '.png'))]
-                    if arquivos:
-                        caminho_final_encontrado = os.path.join(pasta_do_exame, arquivos[0])
 
-            if caminho_final_encontrado:
-                img_processada = pre_processar_imagem(caminho_final_encontrado, max_dim)
-                if img_processada is None: continue
-
-                RAG(img_processada, n_nodes=param_calibracao['n_nodes'])
-
-        tempo_fim_calibracao = time.time()
-        
-        tempo_por_imagem = (tempo_fim_calibracao - tempo_inicio_calibracao) / n_imagens_calibracao
-        total_imagens_a_processar = len(df_manifest) * len(experimentos_pendentes)
-        tempo_total_estimado_segundos = tempo_por_imagem * total_imagens_a_processar
-        
-        agora = datetime.now()
-        previsao_termino = agora + timedelta(seconds=tempo_total_estimado_segundos)
-        
-        print(f"\nTempo médio por imagem (calibrado): {tempo_por_imagem:.2f} segundos.")
-        print(f"Total de imagens a processar: {total_imagens_a_processar} ({len(experimentos_pendentes)} experimentos).")
-        print(f"🕒 Duração total estimada: aproximadamente {formatar_tempo(tempo_total_estimado_segundos)}")
-        print(f"🗓️  Previsão de término: {previsao_termino.strftime('%A, %d de %B de %Y às %H:%M')}")
-
-    # --- Loop principal de extração ---
     for max_dim in LISTA_MAX_DIM:
         for n_nodes in LISTA_N_NODES:
             dim_folder_name = "original" if max_dim is None else str(max_dim)
@@ -150,36 +133,26 @@ def gerar_features():
                 print(f"Resultado já existe. Pulando.")
                 continue
 
-            lista_grafos_atual = []
-            
-            for index, row in tqdm(df_manifest.iterrows(), total=len(df_manifest), desc=f"Processando {dim_folder_name}/{n_nodes}"):
-                caminho_relativo = row['image file path']
-                caminho_final_encontrado = None
-                partes_caminho = caminho_relativo.split('/')
-                if len(partes_caminho) > 1:
-                    nome_pasta = partes_caminho[-2]
-                    pasta_do_exame = os.path.join(PASTA_IMAGENS, nome_pasta)
-                    if os.path.isdir(pasta_do_exame):
-                        arquivos = [f for f in os.listdir(pasta_do_exame) if f.lower().endswith(('.jpeg', '.jpg', '.png'))]
-                        if arquivos:
-                            caminho_final_encontrado = os.path.join(pasta_do_exame, arquivos[0])
+            # --- PREPARAÇÃO PARA O PARALELISMO ---
+            # Cria a lista de argumentos para cada worker, que é uma tupla (linha do df, max_dim, n_nodes)
+            tarefas = [(row, max_dim, n_nodes) for _, row in df_manifest.iterrows()]
 
-                if caminho_final_encontrado:
-                    img_processada = pre_processar_imagem(caminho_final_encontrado, max_dim)
-                    if img_processada is None: continue
-                    
-                    # 2. Agora, passa a imagem colorida e com contraste melhorado para o RAG
-                    h_feat, edges, edge_feat, _, _ = RAG(img_processada, n_nodes=n_nodes)
-                    # informações que vão ser salvas no grafo
-                    lista_grafos_atual.append(Data(
-                        x=torch.tensor(h_feat, dtype=torch.float), edge_index=torch.tensor(edges, dtype=torch.long),
-                        edge_attr=torch.tensor(edge_feat, dtype=torch.float), y=torch.tensor([row['label']], dtype=torch.long),
-                        source=row['pathology'], image_file_path=row['image file path']
-                    ))
+            # Cria o pool de workers
+            with Pool(processes=NUM_WORKERS) as pool:
+                # Mapeia as tarefas para os workers e usa tqdm para mostrar o progresso
+                # A função 'processar_e_gerar_grafo' é chamada para cada item em 'tarefas'
+                # O 'chunksize' pode ser ajustado para otimizar a distribuição de trabalho
+                lista_grafos_atual = list(tqdm(
+                    pool.imap(processar_e_gerar_grafo, tarefas),
+                    total=len(tarefas),
+                    desc=f"Processando {dim_folder_name}/{n_nodes}"
+                ))
+
+            # Remove os resultados nulos (casos onde a imagem não pôde ser processada)
+            lista_grafos_atual = [g for g in lista_grafos_atual if g is not None]
 
             if lista_grafos_atual:
                 os.makedirs(output_folder, exist_ok=True)
-                # torch.save(lista_grafos_atual, output_file_path)
                 # nova versão mudou o comportamento padrão do torch.save, então forçando o padrão antigo
                 torch.save(lista_grafos_atual, output_file_path, _use_new_zipfile_serialization=False)
                 print(f"SUCESSO: {len(lista_grafos_atual)} grafos salvos em '{output_file_path}'")

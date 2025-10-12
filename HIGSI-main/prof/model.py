@@ -4,7 +4,8 @@ import torch.nn.functional as F
 from torch_geometric.nn import LayerNorm, Linear, GraphSizeNorm, BatchNorm
 from torch_geometric.nn import global_mean_pool as gap, global_max_pool as gmp, global_add_pool as gdp
 from .gatedgcn import GatedGCNLayer
-from torch_geometric.nn import GATConv
+from torch_geometric.nn import GATv2Conv as GATConv
+
 class BRM(torch.nn.Module):
     def __init__(self, node_feature_size, num_classes, edge_feature_size, embedding_size=64, dropout_gnn=0.0, dropout_classifier=0.0):
         super(BRM, self).__init__()
@@ -102,66 +103,83 @@ class BRM(torch.nn.Module):
         x = self.class2(x)
         return x    
 
+# prof/model.py (arquivo dos modelos)
+
 class BRM_GATConv(torch.nn.Module):
     def __init__(self, node_feature_size, num_classes, edge_feature_size, 
                  embedding_size=128, heads=4, dropout_gnn=0.3, dropout_classifier=0.5):
+        
         super(BRM_GATConv, self).__init__()
         
+        self.edge_emb = Linear(edge_feature_size, embedding_size)
+        
+        # --- Bloco 1 ---
         self.linear_trans11 = Linear(node_feature_size, embedding_size)
-        self.conv1 = GATConv(embedding_size, embedding_size, heads=heads, concat=False, dropout=dropout_gnn)
+        self.conv1 = GATConv(embedding_size, embedding_size, heads=heads, concat=True, 
+                             dropout=dropout_gnn, edge_dim=embedding_size)
         self.bn11 = LayerNorm(in_channels=embedding_size)
-        self.bn12 = LayerNorm(in_channels=embedding_size)
+        # MUDANÇA: LayerNorm após GAT deve aceitar a dimensão concatenada
+        self.bn12 = LayerNorm(in_channels=embedding_size * heads)
         self.bn13 = LayerNorm(in_channels=embedding_size)
-        self.linear_trans12 = Linear(embedding_size, embedding_size)
+        # MUDANÇA: Camada linear deve aceitar a dimensão concatenada e projetar de volta
+        self.linear_trans12 = Linear(embedding_size * heads, embedding_size)
 
+        # --- Bloco 2 ---
         self.linear_trans21 = Linear(embedding_size, embedding_size)
-        self.conv2 = GATConv(embedding_size, embedding_size, heads=heads, concat=False, dropout=dropout_gnn)
+        self.conv2 = GATConv(embedding_size, embedding_size, heads=heads, concat=True,
+                             dropout=dropout_gnn, edge_dim=embedding_size) 
         self.bn21 = LayerNorm(in_channels=embedding_size)
-        self.bn22 = LayerNorm(in_channels=embedding_size)
+        # MUDANÇA: LayerNorm após GAT deve aceitar a dimensão concatenada
+        self.bn22 = LayerNorm(in_channels=embedding_size * heads)
         self.bn23 = LayerNorm(in_channels=embedding_size)
-        self.linear_trans22 = Linear(embedding_size, embedding_size)
+        # MUDANÇA: Camada linear deve aceitar a dimensão concatenada e projetar de volta
+        self.linear_trans22 = Linear(embedding_size * heads, embedding_size)
 
+        # --- Bloco 3 ---
         self.linear_trans31 = Linear(embedding_size, embedding_size)
-        self.conv3 = GATConv(embedding_size, embedding_size, heads=heads, concat=False, dropout=dropout_gnn)
+        self.conv3 = GATConv(embedding_size, embedding_size, heads=heads, concat=True,
+                             dropout=dropout_gnn, edge_dim=embedding_size) 
         self.bn31 = LayerNorm(in_channels=embedding_size)
-        self.bn32 = LayerNorm(in_channels=embedding_size)
+        # MUDANÇA: LayerNorm após GAT deve aceitar a dimensão concatenada
+        self.bn32 = LayerNorm(in_channels=embedding_size * heads)
         self.bn33 = LayerNorm(in_channels=embedding_size)
-        self.linear_trans32 = Linear(embedding_size, embedding_size)
+        # MUDANÇA: Camada linear deve aceitar a dimensão concatenada e projetar de volta
+        self.linear_trans32 = Linear(embedding_size * heads, embedding_size)
 
+        # --- Classificador ---
         self.class1 = Linear(embedding_size*2, 256)
         self.bnl = LayerNorm(in_channels=256)
         self.dropout = nn.Dropout(p=dropout_classifier)
         self.class2 = Linear(256, num_classes)
        
     def forward(self, x, edge_index, edge_attr, batch_index):
-        # A GATConv padrão não usa as features de aresta (edge_attr)
-        # então o edge_emb não é necessário aqui.
+        edge_attr = self.edge_emb(edge_attr)
     
         # Primeiro Bloco
         x = self.linear_trans11(x)
         x = self.bn11(x) 
-        x = F.relu(self.conv1(x, edge_index)) # <-- CORREÇÃO APLICADA
-        x = self.bn12(x)
-        x = self.linear_trans12(x)
-        x = self.bn13(x)
+        x = F.relu(self.conv1(x, edge_index, edge_attr=edge_attr)) # Saída: [N, embedding_size * heads]
+        x = self.bn12(x) # Normaliza na dimensão maior
+        x = self.linear_trans12(x) # Projeta de volta para [N, embedding_size]
+        x = self.bn13(x) # Normaliza na dimensão original
         x1 = torch.cat([gmp(x, batch_index), gap(x, batch_index)], dim=1)
 
         # Segundo Bloco
         x = self.linear_trans21(x)
         x = self.bn21(x) 
-        x = F.relu(self.conv2(x, edge_index)) # <-- CORREÇÃO APLICADA
-        x = self.bn22(x)
-        x = self.linear_trans22(x)
-        x = self.bn23(x)
+        x = F.relu(self.conv2(x, edge_index, edge_attr=edge_attr)) # Saída: [N, embedding_size * heads]
+        x = self.bn22(x) # Normaliza na dimensão maior
+        x = self.linear_trans22(x) # Projeta de volta para [N, embedding_size]
+        x = self.bn23(x) # Normaliza na dimensão original
         x2 = torch.cat([gmp(x, batch_index), gap(x, batch_index)], dim=1)
     
         # Terceiro Bloco
         x = self.linear_trans31(x)
         x = self.bn31(x) 
-        x = F.relu(self.conv3(x, edge_index)) # <-- CORREÇÃO APLICADA
-        x = self.bn32(x)
-        x = self.linear_trans32(x)
-        x = self.bn33(x)
+        x = F.relu(self.conv3(x, edge_index, edge_attr=edge_attr)) # Saída: [N, embedding_size * heads]
+        x = self.bn32(x) # Normaliza na dimensão maior
+        x = self.linear_trans32(x) # Projeta de volta para [N, embedding_size]
+        x = self.bn33(x) # Normaliza na dimensão original
         x3 = torch.cat([gmp(x, batch_index), gap(x, batch_index)], dim=1)
 
         # Classificador
@@ -170,116 +188,93 @@ class BRM_GATConv(torch.nn.Module):
         x = self.bnl(x)
         x = self.dropout(x)
         x = self.class2(x)
-        return x 
+        return x
 
 
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-# class HIGSI(torch.nn.Module):
-#     def __init__(self, node_feature_size, num_classes, edge_feature_size, embedding_size=64):
-#         super(HIGSI, self).__init__()
+class HIGSI(torch.nn.Module):
+    def __init__(self, node_feature_size, num_classes, edge_feature_size, embedding_size=64):
+        super(HIGSI, self).__init__()
         
-#         self.edge_emb = Linear(edge_feature_size, embedding_size)
-#         self.conv1 = GatedGCNLayer(in_dim=embedding_size,
-#                                     out_dim=embedding_size,
-#                                     dropout=0.5,  # Dropout is handled by GraphGym's `GeneralLayer` wrapper
-#                                     residual=True,  # Residual connections are handled by GraphGym's `GNNStackStage` wrapper
-#                                     equivstable_pe=False)
-#         self.bn11 = LayerNorm(in_channels=embedding_size)
-#         self.bn12 = LayerNorm(in_channels=embedding_size)
-#         self.bn13 = LayerNorm(in_channels=embedding_size)
+        self.edge_emb = Linear(edge_feature_size, embedding_size)
+        self.conv1 = GatedGCNLayer(in_dim=embedding_size,
+                                    out_dim=embedding_size,
+                                    dropout=0.,  # Dropout is handled by GraphGym's `GeneralLayer` wrapper
+                                    residual=True,  # Residual connections are handled by GraphGym's `GNNStackStage` wrapper
+                                    equivstable_pe=False)
+        self.bn11 = LayerNorm(in_channels=embedding_size)
+        self.bn12 = LayerNorm(in_channels=embedding_size)
+        self.bn13 = LayerNorm(in_channels=embedding_size)
 
-#         self.linear_trans11 = Linear(node_feature_size, embedding_size)
-#         self.linear_trans12 = Linear(embedding_size, embedding_size)
+        self.linear_trans11 = Linear(node_feature_size, embedding_size)
+        self.linear_trans12 = Linear(embedding_size, embedding_size)
      
-#         self.conv2 = GatedGCNLayer(in_dim=embedding_size,
-#                                     out_dim=embedding_size,
-#                                     dropout=0.5,  # Dropout is handled by GraphGym's `GeneralLayer` wrapper
-#                                     residual=True,  # Residual connections are handled by GraphGym's `GNNStackStage` wrapper
-#                                     equivstable_pe=False)
-#         self.bn21 = LayerNorm(in_channels=embedding_size)
-#         self.bn22 = LayerNorm(in_channels=embedding_size)
-#         self.bn23 = LayerNorm(in_channels=embedding_size)
+        self.conv2 = GatedGCNLayer(in_dim=embedding_size,
+                                    out_dim=embedding_size,
+                                    dropout=0.,  # Dropout is handled by GraphGym's `GeneralLayer` wrapper
+                                    residual=True,  # Residual connections are handled by GraphGym's `GNNStackStage` wrapper
+                                    equivstable_pe=False)
+        self.bn21 = LayerNorm(in_channels=embedding_size)
+        self.bn22 = LayerNorm(in_channels=embedding_size)
+        self.bn23 = LayerNorm(in_channels=embedding_size)
 
-#         self.linear_trans21 = Linear(embedding_size, embedding_size)
-#         self.linear_trans22 = Linear(embedding_size, embedding_size)
+        self.linear_trans21 = Linear(embedding_size, embedding_size)
+        self.linear_trans22 = Linear(embedding_size, embedding_size)
 
-#         self.conv3 = GatedGCNLayer(in_dim=embedding_size,
-#                                     out_dim=embedding_size,
-#                                     dropout=0.5,  # Dropout is handled by GraphGym's `GeneralLayer` wrapper
-#                                     residual=True,  # Residual connections are handled by GraphGym's `GNNStackStage` wrapper
-#                                     equivstable_pe=False)
-#         self.bn31 = LayerNorm(in_channels=embedding_size)
-#         self.bn32 = LayerNorm(in_channels=embedding_size)
-#         self.bn33 = LayerNorm(in_channels=embedding_size)
+        self.conv3 = GatedGCNLayer(in_dim=embedding_size,
+                                    out_dim=embedding_size,
+                                    dropout=0.,  # Dropout is handled by GraphGym's `GeneralLayer` wrapper
+                                    residual=True,  # Residual connections are handled by GraphGym's `GNNStackStage` wrapper
+                                    equivstable_pe=False)
+        self.bn31 = LayerNorm(in_channels=embedding_size)
+        self.bn32 = LayerNorm(in_channels=embedding_size)
+        self.bn33 = LayerNorm(in_channels=embedding_size)
 
-#         self.linear_trans31 = Linear(embedding_size, embedding_size)
-#         self.linear_trans32 = Linear(embedding_size, embedding_size)
+        self.linear_trans31 = Linear(embedding_size, embedding_size)
+        self.linear_trans32 = Linear(embedding_size, embedding_size)
 
-#         self.graph_size_norm = GraphSizeNorm()
-#         self.class1 = Linear(embedding_size, 256)
-#         self.class2 = Linear(256, num_classes)
+        self.graph_size_norm = GraphSizeNorm()
+        self.class1 = Linear(embedding_size, 256)
+        self.class2 = Linear(256, num_classes)
         
-#     def forward(self, x, edge_index, edge_attr, batch_index, graph_index, reduced_index):
-#         #First Block
-#         edge_attr = self.edge_emb(edge_attr)
+    def forward(self, x, edge_index, edge_attr, batch_index, graph_index, reduced_index):
+        #First Block
+        edge_attr = self.edge_emb(edge_attr)
     
-#         x = self.linear_trans11(x)
-#         x = self.bn11(x) 
-#         x, edge_attr = self.conv1(x, edge_index, edge_attr)
-#         x = self.bn12(x)
-#         x = self.linear_trans12(x)
-#         x = self.bn13(x)
+        x = self.linear_trans11(x)
+        x = self.bn11(x) 
+        x, edge_attr = self.conv1(x, edge_index, edge_attr)
+        x = self.bn12(x)
+        x = self.linear_trans12(x)
+        x = self.bn13(x)
 
-#         # Second block
-#         x = self.linear_trans21(x)
-#         x = self.bn21(x) 
-#         x, edge_attr = self.conv2(x, edge_index, edge_attr)
-#         x = self.bn22(x)
-#         x = self.linear_trans22(x)
-#         x = self.bn23(x)
+        # Second block
+        x = self.linear_trans21(x)
+        x = self.bn21(x) 
+        x, edge_attr = self.conv2(x, edge_index, edge_attr)
+        x = self.bn22(x)
+        x = self.linear_trans22(x)
+        x = self.bn23(x)
     
-#         #Third block
-#         x = self.linear_trans31(x)
-#         x = self.bn31(x) 
-#         x, edge_attr = self.conv3(x, edge_index, edge_attr)
-#         x = self.bn32(x)
-#         x = self.linear_trans32(x)
-#         x = self.bn33(x)
+        #Third block
+        x = self.linear_trans31(x)
+        x = self.bn31(x) 
+        x, edge_attr = self.conv3(x, edge_index, edge_attr)
+        x = self.bn32(x)
+        x = self.linear_trans32(x)
+        x = self.bn33(x)
 
-#         x = F.relu(self.class1(x))
+        x = F.relu(self.class1(x))
         
-#         x = self.graph_size_norm(x,graph_index)
-#         x=gdp(x,graph_index)
-#         exp=torch.exp(x)
-#         numerator=exp.sum(dim=1, keepdim=True)
-#         denominator=gdp(numerator,reduced_index).sum(dim=1, keepdim=True)
-#         exp_denominator=denominator.index_select(dim=0, index=reduced_index)
-#         alpha=numerator/exp_denominator
-#         x=x*alpha
+        x = self.graph_size_norm(x,graph_index)
+        x=gdp(x,graph_index)
+        exp=torch.exp(x)
+        numerator=exp.sum(dim=1, keepdim=True)
+        denominator=gdp(numerator,reduced_index).sum(dim=1, keepdim=True)
+        exp_denominator=denominator.index_select(dim=0, index=reduced_index)
+        alpha=numerator/exp_denominator
+        x=x*alpha
 
-#         x = gdp(x, reduced_index)
+        x = gdp(x, reduced_index)
             
-#         x = self.class2(x)
-#         return x
+        x = self.class2(x)
+        return x

@@ -1,47 +1,66 @@
 import os
 import sys
+import time
 import torch
 import numpy as np
-# para iniciar o servidor mlflow ui, rode no terminal:
-# mlflow ui 
-import mlflow
-import mlflow.pytorch
+from datetime import datetime, timedelta 
+import locale
+# --- Importações Específicas do Seu Projeto (Descomente se necessário) ---
+# Se o NameError persistir, verifique o caminho 'prof.model'
+from prof.model import BRM 
+# from prof.grap_utils_new import RAG # Esta importação só é necessária no script de feature extraction
+
+import cv2
+import pandas as pd
 from tqdm import tqdm
+from torch_geometric.data import Data
 from torch_geometric.loader import DataLoader
 from sklearn.model_selection import train_test_split
 from sklearn.metrics import accuracy_score, classification_report
-from collections import Counter
-
-from prof.model import BRM
+from sklearn.preprocessing import StandardScaler 
+from collections import Counter, defaultdict
+from multiprocessing import Pool, cpu_count 
 
 from decouple import config
-
-PASTA_FEATURES = config("PASTA_FEATURES")
-if not PASTA_FEATURES:
-    raise ValueError("ERRO: Variável PASTA_FEATURES não encontrada. Verifique seu arquivo .env.")
+import mlflow
+import mlflow.pytorch
 
 # ==============================================================================
 # --- PAINEL DE CONTROLE DO EXPERIMENTO ---
 # ==============================================================================
+# Variáveis do .env
+# Certifique-se de que estas estão configuradas corretamente
+ARQUIVO_MANIFEST = config("MANIFEST_FILE_PATH")
+PASTA_IMAGENS = config("DATASET_IMAGES_PATH")
+PASTA_FEATURES = config("PASTA_FEATURES")
+
+if not ARQUIVO_MANIFEST or not PASTA_IMAGENS or not PASTA_FEATURES:
+    # Esta verificação falha se o .env não estiver carregado, mas é mantida
+    # para evitar um erro se a função main for chamada diretamente sem ambiente configurado.
+    pass 
+
 # conjunto de features
 MAX_DIM_A_TESTAR = 1024
 N_NODES_A_TESTAR = 25  
 
 # Parâmetros de Treinamento
-EPOCHS = 150
+EPOCHS = 130
 BATCH_SIZE = 16
-LEARNING_RATE = 0.001
+LEARNING_RATE = 0.0005
 RANDOM_SEED = 42
 TEST_SPLIT_SIZE = 0.10 # % para teste
 VAL_SPLIT_SIZE = 0.10   # % para validação (do que sobrar do treino)
 NUM_CLASSES = 2
-EMBEDDING_SIZE = 200 # IMPORTANTE: Deve ser o mesmo usado no treino (64 ou 128)
+EMBEDDING_SIZE = 200 
+
+# --- PARAMETRO DE BALANCEAMENTO ---
+USE_WEIGHTED_LOSS = True 
+# ----------------------------------
 
 DROPOUT_GNN = 0.3
 DROPOUT_CLASSIFIER = 0.3
-EARLY_STOPPING_PATIENCE = 100 # Parar após x épocas sem melhora
-# usar 1e-3, 5e-4, 2e-3
-WEIGHT_DECAY = 5e-4 # regularização
+EARLY_STOPPING_PATIENCE = 100 
+WEIGHT_DECAY = 5e-4 
 # ==============================================================================
 
 
@@ -50,6 +69,8 @@ torch.manual_seed(RANDOM_SEED)
 np.random.seed(RANDOM_SEED)
 if torch.cuda.is_available():
     torch.cuda.manual_seed(RANDOM_SEED)
+
+# --- FUNÇÕES AUXILIARES ---
 
 def count_parameters(model):
     """Conta o número de parâmetros treináveis no modelo."""
@@ -71,8 +92,8 @@ def val(epoch, model, val_loader, loss_fn, device, run_type):
     with torch.no_grad():
         for batch in val_loader:
             batch = batch.to(device)
-            pred = model(batch.x, batch.edge_index, batch.edge_attr, batch.batch)
-            loss = loss_fn(pred, batch.y) # Adaptado para labels de uma dimensão
+            pred = model(batch.x, batch.edge_index, batch.edge_attr, batch.batch) 
+            loss = loss_fn(pred, batch.y) 
             total_loss += loss.item()
             
             all_preds.append(pred.argmax(dim=1).cpu().numpy())
@@ -94,8 +115,8 @@ def train(epoch, model, train_loader, optimizer, loss_fn, device):
     for batch in tqdm(train_loader, desc=f"Época {epoch+1}/{EPOCHS}", leave=False):
         batch = batch.to(device)
         optimizer.zero_grad()
-        pred = model(x=batch.x, edge_index=batch.edge_index, edge_attr=batch.edge_attr, batch_index=batch.batch)
-        loss = loss_fn(pred, batch.y) # Adaptado para labels de uma dimensão
+        pred = model(x=batch.x, edge_index=batch.edge_index, edge_attr=batch.edge_attr, batch_index=batch.batch) 
+        loss = loss_fn(pred, batch.y) 
         loss.backward()
         optimizer.step()
         
@@ -110,51 +131,94 @@ def train(epoch, model, train_loader, optimizer, loss_fn, device):
     return avg_loss
 
 def salva_modelo_treinado(dim_folder_name):
-    # ==============================================================================
     # --- SALVAR O MODELO TREINADO ---
-    # ==============================================================================
-    # 1. Pega o caminho absoluto do diretório onde este script está
     diretorio_do_script = os.path.dirname(os.path.abspath(__file__))
-
-    # 2. Cria o caminho completo para o arquivo de pesos DENTRO de uma pasta 'weights'
-    #    que ficará no mesmo diretório do script.
     save_dir = os.path.join(
         diretorio_do_script, 
         "weights", 
         f"BRM_{dim_folder_name}_{N_NODES_A_TESTAR}_seed{RANDOM_SEED}.pth"
     )
-
-    # 3. Garante que o diretório 'weights' exista antes de salvar
     os.makedirs(os.path.dirname(save_dir), exist_ok=True)
     return save_dir
 
 def resgata_dados_treinamento(dim_folder_name):
-    # Lógica para resgatar os dados de treinamento onde estão salvos
-   
+    """Carrega os grafos de lesões (dataset completo)."""
+    # Certifique-se de que PASTA_FEATURES está carregada corretamente
+    PASTA_FEATURES = config("PASTA_FEATURES") 
     ARQUIVO_GRAFOS_PRONTOS = os.path.join(PASTA_FEATURES, dim_folder_name, f'{N_NODES_A_TESTAR}.pt')
     if not os.path.exists(ARQUIVO_GRAFOS_PRONTOS):
-        raise FileNotFoundError(f"ERRO: Arquivo de grafos '{ARQUIVO_GRAFOS_PRONTOS}' não encontrado.")
+        raise FileNotFoundError(f"ERRO: Arquivo de grafos '{ARQUIVO_GRAFOS_PRONTOS}' não encontrado. Execute o script de extração de features primeiro.")
     print("="*60)
     print("Iniciando Experimento com MLFlow")
     print(f"  - Carregando features de: {ARQUIVO_GRAFOS_PRONTOS}")
     return torch.load(ARQUIVO_GRAFOS_PRONTOS, weights_only=False)
+
+def resolver_conflitos_e_agregar_grafos(lista_grafos_lesoes):
+    """
+    Resolve o conflito de múltiplos diagnósticos por imagem e agrega os grafos,
+    aplicando a regra do Máximo (MAX Pooling) na label.
+    """
+    print("\n" + "="*60)
+    print("Resolvendo Conflitos: Agrupamento por Imagem (Max Pooling de Label)")
+    print(f"  - Grafos de Lesão Carregados: {len(lista_grafos_lesoes)}")
+
+    label_por_caminho = defaultdict(lambda: 0) 
+
+    # 1. Encontrar a label final (MAX) para cada imagem
+    for grafo in lista_grafos_lesoes:
+        caminho = grafo.image_file_path
+        lesao_label = grafo.y.item()
+        label_por_caminho[caminho] = max(label_por_caminho[caminho], lesao_label)
+
+    print(f"  - Total de Imagens Únicas: {len(label_por_caminho)}")
+
+    # 2. Criar o novo dataset de grafos (um por imagem)
+    primeiros_grafos = {}
+    lista_grafos_unicos = []
+
+    for grafo in lista_grafos_lesoes:
+        caminho = grafo.image_file_path
+        
+        # Só consideramos o primeiro grafo encontrado para cada caminho de imagem
+        if caminho not in primeiros_grafos:
+            # Clona e atualiza a label para a label final da IMAGEM
+            grafo_copia = grafo.clone()
+            final_label = label_por_caminho[caminho]
+            grafo_copia.y = torch.tensor([final_label], dtype=torch.long)
+            
+            primeiros_grafos[caminho] = True
+            lista_grafos_unicos.append(grafo_copia)
+
+    # 3. Verificar o resultado
+    y_final = [g.y.item() for g in lista_grafos_unicos]
+    print(f"  - Total de Grafos Únicos gerados: {len(lista_grafos_unicos)}")
+    print(f"  - Contagem de Labels Finais: {Counter(y_final)}")
+    print("="*60)
+    
+    return lista_grafos_unicos
+
 def normalizar_features(lista_grafos):
-    from sklearn.preprocessing import StandardScaler
-
-    # --- NORMALIZAÇÃO DE FEATURES ---
+    """Aplica a Normalização Z-score nas features de todos os nós."""
     print("Normalizando as features dos nós...")
-    # Juntar todas as features de todos os grafos em uma única matriz
-    all_node_features = torch.cat([data.x for data in lista_grafos], dim=0)
+    # Tenta concatenar features. Se x for uma lista vazia, ignora.
+    try:
+        all_node_features = torch.cat([data.x for data in lista_grafos], dim=0)
+    except RuntimeError:
+        print("AVISO: Lista de features vazia, pulando normalização.")
+        return lista_grafos
 
-    # Criar e treinar o normalizador APENAS nos dados
     scaler = StandardScaler()
-    scaler.fit(all_node_features.numpy())
+    scaler.fit(all_node_features.cpu().numpy()) # Treina na CPU para segurança
 
-    # Aplicar a normalização a cada grafo individualmente
     for data in lista_grafos:
-        data.x = torch.from_numpy(scaler.transform(data.x.numpy())).float()
+        # Aplica na CPU e volta para tensor, se necessário
+        data.x = torch.from_numpy(scaler.transform(data.x.cpu().numpy())).float()
+        # Não precisa mover de volta para o device aqui, pois será feito no DataLoader
+        
     print("Normalização concluída.")
     return lista_grafos
+
+
 def main():
     # printa os parâmetros do experimento
     print("="*60)
@@ -171,41 +235,35 @@ def main():
     print(f"  - Val Split Size: {VAL_SPLIT_SIZE}")
     print(f"  - Random Seed: {RANDOM_SEED}")
     print(f"  - Early Stopping Patience: {EARLY_STOPPING_PATIENCE}")
+    print(f"  - Usando Loss Ponderada: {USE_WEIGHTED_LOSS}")
     print("="*60)
     patience_counter = 0
 
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
     
-    # --- 2. CARREGAR E DIVIDIR OS DADOS ---
+    # --- 2. CARREGAR, RESOLVER CONFLITOS E DIVIDIR OS DADOS ---
     dim_folder_name = "original" if MAX_DIM_A_TESTAR is None else str(MAX_DIM_A_TESTAR)
 
-    lista_grafos = resgata_dados_treinamento(dim_folder_name)
-    
+    lista_grafos_lesoes = resgata_dados_treinamento(dim_folder_name)
+    lista_grafos_unicos = resolver_conflitos_e_agregar_grafos(lista_grafos_lesoes)
 
-    lista_grafos = normalizar_features(lista_grafos)
+    lista_grafos_unicos = normalizar_features(lista_grafos_unicos)
 
-    # Agora o código de divisão de dados continua 
-    # labels = [g.y.item() for g in lista_grafos]
-    print(lista_grafos[0])
-    try:
-        stratify_labels = [g.source for g in lista_grafos]
-        print(f"Contagem de subgrupos para estratificação: {Counter(stratify_labels)}")
-    except AttributeError:
-        print("AVISO: Atributo '.source' não encontrado. Usando labels binários (0/1) para estratificação.")
-        stratify_labels = [g.y.item() for g in lista_grafos]
+
+    # Usamos a lista_grafos_unicos para a divisão, estratificando pela label final (y)
+    stratify_labels = [g.y.item() for g in lista_grafos_unicos] 
     
+    # Divisão em Treino+Validação e Teste
     train_val_data, test_data = train_test_split(
-        lista_grafos,
+        lista_grafos_unicos, 
         test_size=TEST_SPLIT_SIZE,
         stratify=stratify_labels,
         random_state=RANDOM_SEED
     )
 
     
-    # Dividir treino+validação em treino e validação
-    # train_val_labels = [g.y.item() for g in train_val_data]
-    # Ajusta o tamanho da validação para ser relativo ao conjunto de treino+validação
-    train_val_stratify_labels = [g.source for g in train_val_data]
+    # Divisão em Treino e Validação
+    train_val_stratify_labels = [g.y.item() for g in train_val_data]
     val_split_adjusted = VAL_SPLIT_SIZE / (1.0 - TEST_SPLIT_SIZE)
     train_data, val_data = train_test_split(
         train_val_data,
@@ -214,27 +272,41 @@ def main():
         random_state=RANDOM_SEED
     )
 
-    # printa os casos que existem no train data
-    print(f"Contagem de classes no treino: {Counter([g.y.item() for g in train_data])}")
-    print(f"Contagem de classes na validação: {Counter([g.y.item() for g in val_data])}")
+    # --- CÁLCULO DE PESOS (NOVO) ---
+    train_labels_y = [g.y.item() for g in train_data] 
+    class_counts = Counter(train_labels_y)
+    total_samples = len(train_data)
+
+    if USE_WEIGHTED_LOSS:
+        weight_benign = total_samples / (NUM_CLASSES * class_counts[0])
+        weight_malign = total_samples / (NUM_CLASSES * class_counts[1])
+        
+        class_weights = torch.tensor([weight_benign, weight_malign], dtype=torch.float32)
+        print(f"\n--- Pesos da Perda Calculados ---")
+        print(f"  - Count Benigno (0): {class_counts[0]}")
+        print(f"  - Count Maligno (1): {class_counts[1]}")
+        print(f"  - Pesos (B/M): {class_weights.tolist()}")
+    else:
+        class_weights = None
+        print("\n--- Usando Perda Não Ponderada ---")
+    # -------------------------------
+
+
+    # Configuração dos Loaders
     train_loader = DataLoader(train_data, batch_size=BATCH_SIZE, shuffle=True)
     val_loader = DataLoader(val_data, batch_size=BATCH_SIZE, shuffle=False)
     test_loader = DataLoader(test_data, batch_size=BATCH_SIZE, shuffle=False)
+    
     # --- BLOCO DE VERIFICAÇÃO DA ESTRATIFICAÇÃO ---
     print("\n" + "-"*60)
     print("--- Verificando a Distribuição das Classes nos Conjuntos ---")
 
-    # Contando as classes no conjunto de Treino
-    train_labels = [g.source for g in train_data]
-    print(f"Distribuição no Treino ({len(train_data)} amostras): {Counter(train_labels)}")
+    val_labels_y = [g.y.item() for g in val_data] 
+    test_labels_y = [g.y.item() for g in test_data] 
 
-    # Contando as classes no conjunto de Validação
-    val_labels = [g.source for g in val_data]
-    print(f"Distribuição na Validação ({len(val_data)} amostras): {Counter(val_labels)}")
-
-    # Contando as classes no conjunto de Teste
-    test_labels = [g.source for g in test_data]
-    print(f"Distribuição no Teste ({len(test_data)} amostras): {Counter(test_labels)}")
+    print(f"Distribuição no Treino ({len(train_data)} amostras): {Counter(train_labels_y)}")
+    print(f"Distribuição na Validação ({len(val_data)} amostras): {Counter(val_labels_y)}")
+    print(f"Distribuição no Teste ({len(test_data)} amostras): {Counter(test_labels_y)}")
 
     print(f"Dataset carregado e dividido:")
     print(f"  - Treino: {len(train_data)} grafos")
@@ -244,7 +316,12 @@ def main():
     print("="*60)
 
     # --- 3. CONFIGURAR MODELO, OTIMIZADOR E MLFLOW ---
-    model = BRM(
+    # Move os pesos para o device
+    if USE_WEIGHTED_LOSS:
+        class_weights = class_weights.to(device)
+        
+    # NOTE: Certifique-se de que BRM está importado e acessível
+    model = BRM( 
         node_feature_size=train_data[0].num_node_features,
         edge_feature_size=train_data[0].num_edge_features,
         num_classes=NUM_CLASSES,
@@ -255,15 +332,16 @@ def main():
 
     print(f"Número de parâmetros do modelo: {count_parameters(model)}")
     
-
     save_dir = salva_modelo_treinado(dim_folder_name)
 
-    loss_fn = torch.nn.CrossEntropyLoss()
+    # Inicializa a função de perda com os pesos
+    loss_fn = torch.nn.CrossEntropyLoss(weight=class_weights)
+    
     optimizer = torch.optim.Adam(model.parameters(), lr=LEARNING_RATE,  weight_decay=WEIGHT_DECAY)
     scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(optimizer, mode='max', patience=15, min_lr=1e-6, factor=0.5)
     
     # Configurar MLFlow
-    experiment_name = f"BRM - ImgSize {dim_folder_name} - Nodes {N_NODES_A_TESTAR}"
+    experiment_name = f"BRM - ImgSize {dim_folder_name} - Nodes {N_NODES_A_TESTAR} - WLoss {USE_WEIGHTED_LOSS}"
     mlflow.set_tracking_uri("http://127.0.0.1:5000")
     mlflow.set_experiment(experiment_name)
 
@@ -275,38 +353,33 @@ def main():
         mlflow.log_param("epochs", EPOCHS)
         mlflow.log_param("batch_size", BATCH_SIZE)
         mlflow.log_param("learning_rate", LEARNING_RATE)
-        mlflow.log_param("random_seed", RANDOM_SEED)
-        mlflow.log_param("image_dimension", dim_folder_name)
-        mlflow.log_param("node_count", N_NODES_A_TESTAR)
+        # Log dos pesos
+        if USE_WEIGHTED_LOSS:
+            mlflow.log_param("loss_weight_benign", class_weights[0].item())
+            mlflow.log_param("loss_weight_malign", class_weights[1].item())
 
         for epoch in range(EPOCHS):
             print(f"--- Época {epoch+1}/{EPOCHS} ---")
             
-            # Treino
             train_loss = train(epoch=epoch, model=model, train_loader=train_loader, optimizer=optimizer, loss_fn=loss_fn, device=device)
-            # print(f"Train Loss: {train_loss:.4f}")
             mlflow.log_metric(key="Loss-train", value=float(train_loss), step=epoch)
             
-            # Validação
             val_loss, val_accu = val(epoch=epoch, model=model, val_loader=val_loader, loss_fn=loss_fn, device=device, run_type="val")
-            # print(f"Val Loss: {val_loss:.4f}")
             mlflow.log_metric(key="Loss-val", value=float(val_loss), step=epoch)
             print(f"Train Loss: {train_loss:.4f} | Val Loss: {val_loss:.4f}")
-            # Teste (opcional a cada época, bom para monitorar)
-            # _, test_accu = val(epoch=epoch, model=model, val_loader=test_loader, loss_fn=loss_fn, device=device, run_type="test")
             
             # Salvar o melhor modelo
             if val_accu > best_val_accu:
                 best_val_accu = val_accu
                 torch.save(model.state_dict(), save_dir)
                 mlflow.log_metric(key="Best Val Accuracy", value=float(best_val_accu), step=epoch)
-                patience_counter = 0 # Reseta o contador
+                patience_counter = 0 
                 print(f"✨ Novo melhor modelo salvo em '{save_dir}' com acurácia de validação: {best_val_accu:.4f}")
             else:
                 patience_counter += 1
             if patience_counter >= EARLY_STOPPING_PATIENCE:
                 print(f"--- Parada antecipada na época {epoch+1} ---")
-                break # Sai do loop de treino
+                break 
             scheduler.step(val_accu)
         print("\n--- Treinamento Concluído ---")
     
@@ -314,7 +387,6 @@ def main():
     print("\n" + "="*60)
     print("Carregando o melhor modelo para avaliação final no conjunto de teste...")
     
-    # Instanciar uma nova arquitetura de modelo
     best_model = BRM(
         node_feature_size=test_data[0].num_node_features,
         edge_feature_size=test_data[0].num_edge_features,
@@ -322,30 +394,26 @@ def main():
         embedding_size=EMBEDDING_SIZE
     ).to(device)
 
-    # Carregar os pesos salvos
     best_model.load_state_dict(torch.load(save_dir, weights_only=True))
     best_model.eval()
 
-    # Avaliar no conjunto de teste
-    test_preds, test_labels = [], []
+    test_preds, test_labels_final = [], []
     with torch.no_grad():
         for data in test_loader:
             data = data.to(device)
             out = best_model(data.x, data.edge_index, data.edge_attr, data.batch)
             pred = out.argmax(dim=1)
             test_preds.extend(pred.cpu().tolist())
-            test_labels.extend(data.y.cpu().tolist())
+            test_labels_final.extend(data.y.cpu().tolist()) 
 
     # Exibir o relatório de classificação final
     print("\n--- Relatório de Classificação Final (Melhor Modelo no Teste) ---")
-    final_accuracy = accuracy_score(test_labels, test_preds)
+    final_accuracy = accuracy_score(test_labels_final, test_preds)
     print(f"Acurácia Final no Teste: {final_accuracy:.4f}\n")
-    print(classification_report(test_labels, test_preds, target_names=["Benigno (0)", "Maligno (1)"]))
+    print(classification_report(test_labels_final, test_preds, target_names=["Benigno (0)", "Maligno (1)"]))
     
     # Logar as métricas finais no MLFlow
-    # PARA:
-    # Logar as métricas finais no MLFlow
-    final_metrics = classification_report(test_labels, test_preds, output_dict=True)
+    final_metrics = classification_report(test_labels_final, test_preds, output_dict=True)
     mlflow.log_metric("final_test_accuracy", final_metrics['accuracy'])
     mlflow.log_metric("final_test_precision_benign", final_metrics['0']['precision'])
     mlflow.log_metric("final_test_recall_benign", final_metrics['0']['recall'])      
@@ -355,3 +423,6 @@ def main():
     mlflow.log_metric("final_test_f1_malign", final_metrics['1']['f1-score'])        
     print("="*60)
     print("\n--- Treinamento Concluído ---")
+
+if __name__ == "__main__":
+    main()
