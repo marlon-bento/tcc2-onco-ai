@@ -14,10 +14,22 @@ from skimage import data, io, color
 from torchvision.datasets import CIFAR10
 from skimage.segmentation import slic, mark_boundaries
 from skimage.measure import find_contours, regionprops, label
+# Importação direta do DISF, agora que está instalado no venv
+try:
+    import disf
+    if hasattr(disf, 'compute_superpixels'):
+        print("Atributo 'compute_superpixels' encontrado no módulo 'disf'.")
+    else:
+        print("Atributo 'compute_superpixels' NÃO encontrado no módulo 'disf'.")
+except ImportError as e:
+    print(f"ERRO: Não foi possível importar o módulo 'disf'")
+    print(f"Detalhes do erro: {e}")
+    disf = None  # Define 'disf' como None se a importação falhar
+
 NP_TORCH_FLOAT_DTYPE = np.float32
 NP_TORCH_LONG_DTYPE = np.int64
 
-NUM_FEATURES = 5 #104 #159 #5
+NUM_FEATURES = 5
 NUM_CLASSES = 10
 
 def be_np(PIL_image):
@@ -307,6 +319,122 @@ def RAG(image,n_nodes=6):
     
     return h, edges.T, edge_features, h[:,11:13] 
 
+def RAG_DISF(image, n_nodes=100):
+    """
+    Gera o Grafo de Adjacência de Regiões (RAG) usando o algoritmo DISF 
+    para segmentação, em vez do SLIC.
+    """
+    NUM_FEATURES = 103
+
+    if disf is None:
+        raise RuntimeError("O módulo DISF não foi carregado corretamente.")
+
+    image_int32 = image.astype(np.int32)
+    
+    num_sementes_inicial = max(n_nodes * 2, 200)
+    
+    super_pixel, _ = disf.DISF_Superpixels(
+        image_int32,
+        num_sementes_inicial,
+        n_nodes 
+    )
+
+    label_img = super_pixel  
+    
+    asegments = np.array(label_img) + 1
+    g = graph.rag_mean_color(image, asegments)
+
+    image_features = image
+    greyscale_image = cv2.cvtColor(image, cv2.COLOR_RGB2GRAY)
+    img_blur = cv2.GaussianBlur(greyscale_image, (3,3), sigmaX=0, sigmaY=0) 
+    canny = cv2.Canny(image=img_blur, threshold1=100, threshold2=200) 
+    
+    num_nodes_reais = np.max(asegments) 
+    nodes = { 
+
+        node: {
+            "rgb_list": [],
+            "pos_list": [],
+            "histogram": np.zeros((8,)),
+            "props_features": np.zeros((22,)),
+            "texture_features": np.zeros((68,)),
+        } for node in range(num_nodes_reais)
+    }
+
+    height = image.shape[0]   
+    width = image.shape[1]  
+    for y in range(height):
+        for x in range(width):
+            node_idx = asegments[y,x]-1 
+            rgb = image_features[y,x,:]
+            pos = np.array([float(x),float(y)])
+            if node_idx < len(nodes): 
+                nodes[node_idx]["rgb_list"].append(rgb) 
+                nodes[node_idx]["pos_list"].append(pos)
+
+    G = nx.Graph()
+    mask_n = 0
+    for node_idx, node_data in nodes.items():
+        if not node_data["rgb_list"]:
+            continue
+            
+        node_data["rgb_list"] = np.stack(node_data["rgb_list"])
+        node_data["pos_list"] = np.stack(node_data["pos_list"])
+        rgb_mean = np.mean(node_data["rgb_list"], axis=0) 
+        pos_mean = np.mean(node_data["pos_list"], axis=0)
+        
+        mask = np.where(asegments == node_idx + 1, 255, 0)
+        node_data["histogram"] = get_histogram(image_features, mask)
+        try: 
+            node_data["props_features"] = mask_to_bbox(mask, image_features, mask_n, False)
+        except (ValueError, IndexError): 
+            node_data["props_features"] = np.zeros((22,)) 
+
+        node_data["texture_features"] = texture_features(greyscale_image, mask, canny)
+        mask_n+=1
+            
+        features = np.concatenate(
+        [
+            np.reshape(rgb_mean, -1),
+            node_data["histogram"],
+            np.reshape(pos_mean, -1),
+            node_data["texture_features"],
+            node_data["props_features"],
+        ]
+        )
+        G.add_node(node_idx, features = list(features))
+    
+    n = len(G.nodes)
+    h = np.zeros([n,NUM_FEATURES]).astype(NP_TORCH_FLOAT_DTYPE)
+
+    node_map = {node_id: i for i, node_id in enumerate(sorted(G.nodes()))}
+    
+    for node_id, i in node_map.items():
+        if 'features' in G.nodes[node_id]:
+            h[i, :] = G.nodes[node_id]['features']
+    
+    edge_list = list(g.edges()) 
+    n_edges = len(list(g.edges()))
+    edges = np.zeros([(2*n_edges),2]).astype(NP_TORCH_LONG_DTYPE)
+    edge_features = np.zeros((edges.shape[0],1)).astype(NP_TORCH_FLOAT_DTYPE)
+    i=0
+    for e,(s,t) in enumerate(edge_list): 
+
+        s_idx = node_map.get(s-1)
+        t_idx = node_map.get(t-1)
+        
+        if s_idx is not None and t_idx is not None:
+            dist=np.linalg.norm(h[s_idx]-h[t_idx])
+            edges[i,0] = s_idx
+            edges[i,1] = t_idx
+            edge_features[i] = dist
+            i=i+1
+            edges[i,0] = t_idx
+            edges[i,1] = s_idx
+            edge_features[i] = dist
+            i=i+1
+
+    return h, edges[:i].T, edge_features[:i], h[:,11:13], None
     
 def MG_superpixel_hierarchy(image, n_nodes, canonized=True):
     NUM_FEATURES=104
@@ -397,7 +525,7 @@ def MG_superpixel_hierarchy(image, n_nodes, canonized=True):
     
     h = np.zeros([num_nodes,NUM_FEATURES]).astype(NP_TORCH_FLOAT_DTYPE)
     G = nx.Graph()
-
+    
     for node in nodes:
         nodes[node]["rgb_list"] = np.stack(nodes[node]["rgb_list"])
         nodes[node]["pos_list"] = np.stack(nodes[node]["pos_list"])
@@ -482,13 +610,3 @@ def MG_superpixel_hierarchy(image, n_nodes, canonized=True):
     return h, edges.T, edge_features, h[:,3:], graph_index, np.zeros(graph_count), np.array([graph_count])
 
 
-# def main():  #USE FOR DEBUG THE GRAPH TRANSFORMATION
-#     dset = CIFAR10("data/raw", download=True, transform=be_np, train=False)#,
-#     # a,b,c,d = RAG(image=dset[0][0], n_nodes=6)
-#     a,b,c,d,e,f,g = MG_superpixel_hierarchy(image=dset[0][0], n_nodes=40, canonized=False)
-#     print("")
-    
-
-# if __name__ == "__main__":
-#    main()
-    

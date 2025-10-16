@@ -8,15 +8,9 @@ import pandas as pd
 from tqdm import tqdm
 from torch_geometric.data import Data
 from decouple import config
-from multiprocessing import Pool, cpu_count # Importa as ferramentas de paralelismo
-
-# Importe a função correta e a classe de dados do seu arquivo de utilidades
-# ATENÇÃO: Verifique se o caminho "prof.graph_utils" está correto
+from multiprocessing import Pool, cpu_count 
 from prof.graph_utils import MG_superpixel_hierarchy
 
-# ==============================================================================
-# --- DEFINIÇÃO DA CLASSE MultiGraphData ---
-# ==============================================================================
 class MultiGraphData(Data):
     def __inc__(self, key, value, *args, **kwargs):
         if key == 'reduced_index':
@@ -24,40 +18,62 @@ class MultiGraphData(Data):
         if key == 'graph_index':
             return self.ng.item()
         return super().__inc__(key, value, *args, **kwargs)
-
+    
 # ==============================================================================
 # --- PAINEL DE CONTROLE DO EXPERIMENTO ---
 # ==============================================================================
-ARQUIVO_MANIFEST = config("MANIFEST_FILE_PATH")
-PASTA_IMAGENS = config("DATASET_IMAGES_PATH")
-PASTA_FEATURES = config("PASTA_FEATURES_HIGSI")
+# Variáveis de Configuração (Aqui você altera o cenário que quer rodar!)
+# ----------------------------------------------------------------------
+# Escolha o tipo de lesão: "MASS" ou "CALC"
+TIPO_LESÃO = "MASS" 
+# Escolha o tipo de segmentação/grafo: "SLIC" ou "DISF"
+TIPO_SEGMENTAÇÃO = "SLIC" 
 
-# --- CONTROLE DE PARALELISMO ---
-# O usuário pediu 4, mas você pode ajustar ou usar todos os disponíveis.
+# Lendo caminhos do arquivo .env 
+DATASET_IMAGES_PATH = config("DATASET_IMAGES_PATH")
+DATASET_MASS = config("DATASET_MASS")
+DATASET_CALC = config("DATASET_CALC")
+
+PASTA_FEATURES_MASS_SLIC = config("PASTA_FEATURES_MASS_HIGSI_SLIC")
+PASTA_FEATURES_MASS_DISF = config("PASTA_FEATURES_MASS_HIGSI_DISF")
+PASTA_FEATURES_CALC_SLIC = config("PASTA_FEATURES_CALC_HIGSI_SLIC")
+PASTA_FEATURES_CALC_DISF = config("PASTA_FEATURES_CALC_HIGSI_DISF")
+ARQUIVO_MANIFEST = ''
+PASTA_FEATURES = ''
+# --- Lógica de Seleção de Caminhos ---
+if TIPO_LESÃO.upper() == "MASS":
+    ARQUIVO_MANIFEST = DATASET_MASS
+    if TIPO_SEGMENTAÇÃO.upper() == "SLIC":
+        PASTA_FEATURES = PASTA_FEATURES_MASS_SLIC
+    elif TIPO_SEGMENTAÇÃO.upper() == "DISF":
+        PASTA_FEATURES = PASTA_FEATURES_MASS_DISF
+    else:
+        raise ValueError("TIPO_SEGMENTAÇÃO deve ser 'SLIC' ou 'DISF'.")
+elif TIPO_LESÃO.upper() == "CALC":
+    ARQUIVO_MANIFEST = DATASET_CALC
+    if TIPO_SEGMENTAÇÃO.upper() == "SLIC":
+        PASTA_FEATURES = PASTA_FEATURES_CALC_SLIC
+    elif TIPO_SEGMENTAÇÃO.upper() == "DISF":
+        PASTA_FEATURES = PASTA_FEATURES_CALC_DISF
+    else:
+        raise ValueError("TIPO_SEGMENTAÇÃO deve ser 'SLIC' ou 'DISF'.")
+else:
+    raise ValueError("TIPO_LESÃO deve ser 'MASS' ou 'CALC'.")
+
+
+if not ARQUIVO_MANIFEST or not DATASET_IMAGES_PATH or not PASTA_FEATURES:
+    raise ValueError("ERRO: Um dos caminhos essenciais não foi definido corretamente.")
+
+
 NUM_WORKERS = 4  # <<-- AQUI VOCÊ DEFINE QUANTOS NÚCLEOS USAR
-# Para usar o máximo de núcleos disponíveis, descomente a linha abaixo:
-# NUM_WORKERS = cpu_count()
 
 
-if not ARQUIVO_MANIFEST or not PASTA_IMAGENS or not PASTA_FEATURES:
+if not ARQUIVO_MANIFEST or not DATASET_IMAGES_PATH or not PASTA_FEATURES:
     raise ValueError("ERRO: Verifique as variáveis de caminho no arquivo .env.")
 
 LISTA_MAX_DIM = [512]
 LISTA_N_NODES = [25,50]
 
-# ==============================================================================
-# --- FUNÇÕES AUXILIARES (sem alterações) ---
-# ==============================================================================
-def formatar_tempo(segundos):
-    horas = int(segundos // 3600)
-    minutos = int((segundos % 3600) // 60)
-    segundos = int(segundos % 60)
-    if horas > 0:
-        return f"{horas}h, {minutos}m e {segundos}s"
-    elif minutos > 0:
-        return f"{minutos}m e {segundos}s"
-    else:
-        return f"{segundos}s"
 
 def pre_processar_imagem(caminho_final_encontrado, max_dim):
     img_color = cv2.imread(caminho_final_encontrado)
@@ -80,9 +96,6 @@ def pre_processar_imagem(caminho_final_encontrado, max_dim):
     
     return img_rgb_final
 
-# ==============================================================================
-# --- NOVA FUNÇÃO DE TRABALHO PARA PROCESSAMENTO PARALELO ---
-# ==============================================================================
 def processar_linha(args):
     """
     Processa uma única linha do manifest. Esta função será executada em paralelo.
@@ -95,7 +108,7 @@ def processar_linha(args):
 
     if len(partes_caminho) > 1:
         nome_pasta = partes_caminho[-2]
-        pasta_do_exame = os.path.join(PASTA_IMAGENS, nome_pasta)
+        pasta_do_exame = os.path.join(DATASET_IMAGES_PATH, nome_pasta)
         if os.path.isdir(pasta_do_exame):
             arquivos = [f for f in os.listdir(pasta_do_exame) if f.lower().endswith(('.jpeg', '.jpg', '.png'))]
             if arquivos:
@@ -106,7 +119,6 @@ def processar_linha(args):
         if img_processada is None:
             return None
         
-        # O trabalho pesado de gerar o grafo
         h_feat, edges, edge_feat, pos, graph_idx, reduced_idx, n_graphs = MG_superpixel_hierarchy(
             img_processada, n_nodes=n_nodes
         )
@@ -128,10 +140,7 @@ def processar_linha(args):
         
     return None
 
-# ==============================================================================
-# --- BLOCO DE EXECUÇÃO (MODIFICADO PARA PARALELISMO) ---
-# ==============================================================================
-def gerar_features_higsi():
+def gerar_features_hierarquico():
     try:
         locale.setlocale(locale.LC_TIME, 'pt_BR.UTF-8')
     except locale.Error:
@@ -154,21 +163,14 @@ def gerar_features_higsi():
                 print(f"Resultado já existe. Pulando.")
                 continue
 
-            # Prepara os argumentos para cada chamada da função de trabalho
             tasks = [(index, row, max_dim, n_nodes) for index, row in df_manifest.iterrows()]
             
             lista_grafos_atual = []
             
-            # --- AQUI ESTÁ A MÁGICA DO PARALELISMO ---
-            # Usamos um 'with' para garantir que os processos do pool sejam encerrados corretamente
             with Pool(processes=NUM_WORKERS) as pool:
-                # 'imap_unordered' processa as tarefas em paralelo e retorna os resultados
-                # assim que ficam prontos, o que é ideal para a barra de progresso.
-                # Envolvemos com tqdm para visualizar o progresso.
                 results_iterator = pool.imap_unordered(processar_linha, tasks)
                 
                 for data in tqdm(results_iterator, total=len(df_manifest), desc=f"Processando {dim_folder_name}/{n_nodes}"):
-                    # Adiciona o resultado à lista somente se não for None
                     if data is not None:
                         lista_grafos_atual.append(data)
 

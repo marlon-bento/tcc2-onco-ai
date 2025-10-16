@@ -1,12 +1,10 @@
 --extra-index-url https://download.pytorch.org/whl/cu121
 --find-links https://data.pyg.org/whl/torch-2.5.1+cu121.html
 
-# Frameworks Web e Servidores
 fastapi==0.115.13
 gunicorn==23.0.0
 gradio==5.34.2
 
-# Machine Learning & Deep Learning (PyTorch com CUDA 12.1)
 torch==2.5.1+cu121
 torchaudio==2.5.1+cu121
 torchvision==0.20.1+cu121
@@ -15,9 +13,8 @@ torch_cluster==1.6.3+pt25cu121
 torch_scatter==2.1.2+pt25cu121
 torch_sparse==0.6.18+pt25cu121
 torch_spline_conv==1.2.2+pt25cu121
-triton==3.1.0 # Dependência importante do PyTorch para performance
+triton==3.1.0 
 
-# Data Science e Computação Científica
 scikit-learn==1.7.0
 pandas==2.3.0
 matplotlib==3.10.3
@@ -25,12 +22,12 @@ opencv-python==4.11.0.86
 imageio==2.37.0
 scikit-image==0.25.2
 
-# MLOps e Banco de Dados
+
 mlflow==3.3.2
 alembic==1.16.5
 SQLAlchemy==2.0.43 
 
-# Utilitários
+
 GitPython==3.1.45
 docker==7.1.0
 python-dotenv==1.1.1

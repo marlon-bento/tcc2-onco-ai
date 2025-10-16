@@ -10,20 +10,52 @@ from sklearn.metrics import accuracy_score, classification_report
 from collections import Counter
 from sklearn.preprocessing import StandardScaler
 
-# IMPORTANTE: Mude a importação de BRM para HIGSI
 from prof.model import HIGSI
 
 from decouple import config
 
-# Use a mesma variável de ambiente que você definiu no script de geração
-PASTA_FEATURES = config("PASTA_FEATURES_HIGSI") 
+# ==============================================================================
+# --- PAINEL DE CONTROLE DO EXPERIMENTO ---
+# ==============================================================================
+# Variáveis de Configuração (Aqui você altera o cenário que quer rodar!)
+# ----------------------------------------------------------------------
+# Escolha o tipo de lesão: "MASS" ou "CALC"
+TIPO_LESÃO = "MASS" 
+# Escolha o tipo de segmentação/grafo: "SLIC" ou "DISF"
+TIPO_SEGMENTAÇÃO = "SLIC" 
+
+PASTA_FEATURES_MASS_SLIC = config("PASTA_FEATURES_MASS_HIGSI_SLIC")
+PASTA_FEATURES_MASS_DISF = config("PASTA_FEATURES_MASS_HIGSI_DISF")
+PASTA_FEATURES_CALC_SLIC = config("PASTA_FEATURES_CALC_HIGSI_SLIC")
+PASTA_FEATURES_CALC_DISF = config("PASTA_FEATURES_CALC_HIGSI_DISF")
+
+PASTA_FEATURES = ''
+# --- Lógica de Seleção de Caminhos ---
+if TIPO_LESÃO.upper() == "MASS":
+    if TIPO_SEGMENTAÇÃO.upper() == "SLIC":
+        PASTA_FEATURES = PASTA_FEATURES_MASS_SLIC
+    elif TIPO_SEGMENTAÇÃO.upper() == "DISF":
+        PASTA_FEATURES = PASTA_FEATURES_MASS_DISF
+    else:
+        raise ValueError("TIPO_SEGMENTAÇÃO deve ser 'SLIC' ou 'DISF'.")
+elif TIPO_LESÃO.upper() == "CALC":
+    if TIPO_SEGMENTAÇÃO.upper() == "SLIC":
+        PASTA_FEATURES = PASTA_FEATURES_CALC_SLIC
+    elif TIPO_SEGMENTAÇÃO.upper() == "DISF":
+        PASTA_FEATURES = PASTA_FEATURES_CALC_DISF
+    else:
+        raise ValueError("TIPO_SEGMENTAÇÃO deve ser 'SLIC' ou 'DISF'.")
+else:
+    raise ValueError("TIPO_LESÃO deve ser 'MASS' ou 'CALC'.")
+
 if not PASTA_FEATURES:
-    raise ValueError("ERRO: Variável PASTA_FEATURES_HIGSI não encontrada. Verifique seu arquivo .env.")
+    raise ValueError("ERRO: Um dos caminhos essenciais não foi definido corretamente.")
+
 # ==============================================================================
 # --- PAINEL DE CONTROLE DO EXPERIMENTO ---
 # ==============================================================================
 MAX_DIM_A_TESTAR = 512
-N_NODES_A_TESTAR = 50 # Deve ser o mesmo valor do script de geração
+N_NODES_A_TESTAR = 50 
 
 EPOCHS = 150
 BATCH_SIZE = 16
@@ -32,7 +64,7 @@ RANDOM_SEED = 42
 TEST_SPLIT_SIZE = 0.13
 VAL_SPLIT_SIZE = 0.13
 NUM_CLASSES = 2
-EMBEDDING_SIZE = 64 # O modelo HIGSI nos arquivos usa 64
+EMBEDDING_SIZE = 64
 EARLY_STOPPING_PATIENCE = 35
 WEIGHT_DECAY = 1e-3
 # ==============================================================================
@@ -51,7 +83,6 @@ def calculate_metrics(y_pred, y_true, epoch, run_type):
     mlflow.log_metric(key=f"Accuracy-{run_type}", value=float(acc), step=epoch)
     return acc
 
-# --- FUNÇÃO DE VALIDAÇÃO (MODIFICADA) ---
 def val(epoch, model, val_loader, loss_fn, device, run_type):
     model.eval()
     total_loss = 0
@@ -59,7 +90,6 @@ def val(epoch, model, val_loader, loss_fn, device, run_type):
     with torch.no_grad():
         for batch in val_loader:
             batch = batch.to(device)
-            # AQUI ESTÁ A MUDANÇA: Passamos os novos argumentos para o modelo
             pred = model(
                 x=batch.x,
                 edge_index=batch.edge_index,
@@ -78,7 +108,6 @@ def val(epoch, model, val_loader, loss_fn, device, run_type):
     acc = calculate_metrics(all_preds, all_labels, epoch, run_type)
     return total_loss / len(val_loader), acc
 
-# --- FUNÇÃO DE TREINAMENTO (MODIFICADA) ---
 def train(epoch, model, train_loader, optimizer, loss_fn, device):
     model.train()
     total_loss = 0
@@ -86,7 +115,6 @@ def train(epoch, model, train_loader, optimizer, loss_fn, device):
     for batch in tqdm(train_loader, desc=f"Época {epoch+1}/{EPOCHS}", leave=False):
         batch = batch.to(device)
         optimizer.zero_grad()
-        # AQUI ESTÁ A MUDANÇA: Passamos os novos argumentos para o modelo
         pred = model(
             x=batch.x,
             edge_index=batch.edge_index,
@@ -147,7 +175,6 @@ def main():
     print(f"  - Treino: {len(train_data)} | Validação: {len(val_data)} | Teste: {len(test_data)}")
     print(f"Usando dispositivo: {device}")
 
-    # --- MUDANÇA PRINCIPAL: INSTANCIAR O MODELO HIGSI ---
     model = HIGSI(
         node_feature_size=train_data[0].num_node_features,
         edge_feature_size=train_data[0].num_edge_features,
@@ -172,10 +199,9 @@ def main():
     patience_counter = 0
 
     with mlflow.start_run() as run:
-        # Log de parâmetros...
+
         mlflow.log_param("model_type", "HIGSI")
         mlflow.log_param("epochs", EPOCHS)
-        # ... (outros logs)
 
         for epoch in range(EPOCHS):
             print(f"--- Época {epoch+1}/{EPOCHS} ---")
@@ -198,14 +224,9 @@ def main():
                 break
             scheduler.step(val_accu)
     
-   
-
-
     
-            # Avaliação final...
         # ==============================================================================
-        # --- INÍCIO DO NOVO BLOCO DE AVALIAÇÃO FINAL ---
-        # Cole este código após a linha "Treinamento Concluído"
+        # --- INÍCIO DO BLOCO DE AVALIAÇÃO FINAL ---
         # ==============================================================================
         print("\n" + "="*60)
         print("Carregando o melhor modelo para avaliação final no conjunto de teste...")
@@ -219,7 +240,6 @@ def main():
         # Listas para guardar as predições e os rótulos verdadeiros do conjunto de teste
         test_preds, test_labels = [], []
 
-        # Desativa o cálculo de gradientes para economizar memória e acelerar
         with torch.no_grad():
             for batch in test_loader:
                 batch = batch.to(device)
@@ -232,9 +252,7 @@ def main():
                     graph_index=batch.graph_index,
                     reduced_index=batch.reduced_index
                 )
-                # Guarda a classe predita (a de maior valor)
                 test_preds.extend(pred.argmax(dim=1).cpu().tolist())
-                # Guarda o rótulo verdadeiro
                 test_labels.extend(batch.y.cpu().tolist())
 
             # Exibe o relatório de classificação final com precisão, recall, f1-score, etc.
@@ -243,7 +261,7 @@ def main():
             print(f"Acurácia Final no Teste: {final_accuracy:.4f}\n")
             print(classification_report(test_labels, test_preds, target_names=["Benigno (0)", "Maligno (1)"]))
 
-            # Loga as métricas finais no MLFlow para fácil comparação
+            # Loga as métricas finais no MLFlow
             final_metrics = classification_report(test_labels, test_preds, output_dict=True)
             mlflow.log_metric("final_test_accuracy", final_metrics['accuracy'])
             mlflow.log_metric("final_test_precision_benign", final_metrics['0']['precision'])
@@ -253,9 +271,7 @@ def main():
             mlflow.log_metric("final_test_recall_malign", final_metrics['1']['recall'])
             mlflow.log_metric("final_test_f1_malign", final_metrics['1']['f1-score'])
             print("="*60)
-            # ==============================================================================
-            # --- FIM DO NOVO BLOCO ---
-            # ==============================================================================
+
     print("\n--- Treinamento Concluído ---")
 if __name__ == "__main__":
     main()
