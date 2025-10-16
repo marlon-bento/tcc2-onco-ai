@@ -1,0 +1,7 @@
+LICENSE
+README
+DISF.egg-info/PKG-INFO
+DISF.egg-info/SOURCES.txt
+DISF.egg-info/dependency_links.txt
+DISF.egg-info/top_level.txt
+python3/DISF_py3.c
