@@ -9,7 +9,7 @@ from treino.treinar_com_brm import main
 from treino.treinar_com_gatconv import main as main_gat
 
 
-from treino.treinar_random_forest import treinar_rf
+# from treino.treinar_random_forest import treinar_rf
 
 from features.gerar_features_hierarquico import gerar_features_hierarquico
 
@@ -48,12 +48,12 @@ def train_gat():
     """
     main_gat()
 
-@app.command("train_rf")
-def train_rf():
-    """
-    Inicia o treinamento do modelo Random Forest.
-    """
-    treinar_rf()
+# @app.command("train_rf")
+# def train_rf():
+#     """
+#     Inicia o treinamento do modelo Random Forest.
+#     """
+#     treinar_rf()
 
 @app.command("train_higsi")
 def train_higsi():
