@@ -1,9 +1,9 @@
 venv/**
 **/venv/**
-HIGSI-main/alteracao/venv/**
-
+HIGSI-main/alteracao/.venv/**
+.venv/
+venv/
+HIGSI-main/.venv
 **/weights/**
-
+.venv/
 **/mlruns/**
-
-
