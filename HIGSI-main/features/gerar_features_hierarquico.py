@@ -9,7 +9,7 @@ from tqdm import tqdm
 from torch_geometric.data import Data
 from decouple import config
 from multiprocessing import Pool, cpu_count 
-from prof.graph_utils import MG_superpixel_hierarchy
+from prof.graph_utils import MG_superpixel_hierarchy, MG_superpixel_hierarchy_DISF
 
 class MultiGraphData(Data):
     def __inc__(self, key, value, *args, **kwargs):
@@ -25,9 +25,9 @@ class MultiGraphData(Data):
 # Variáveis de Configuração (Aqui você altera o cenário que quer rodar!)
 # ----------------------------------------------------------------------
 # Escolha o tipo de lesão: "MASS" ou "CALC"
-TIPO_LESÃO = "MASS" 
+TIPO_LESÃO = "CALC" 
 # Escolha o tipo de segmentação/grafo: "SLIC" ou "DISF"
-TIPO_SEGMENTAÇÃO = "SLIC" 
+TIPO_SEGMENTAÇÃO = "DISF" 
 
 # Lendo caminhos do arquivo .env 
 DATASET_IMAGES_PATH = config("DATASET_IMAGES_PATH")
@@ -71,8 +71,8 @@ NUM_WORKERS = 4  # <<-- AQUI VOCÊ DEFINE QUANTOS NÚCLEOS USAR
 if not ARQUIVO_MANIFEST or not DATASET_IMAGES_PATH or not PASTA_FEATURES:
     raise ValueError("ERRO: Verifique as variáveis de caminho no arquivo .env.")
 
-LISTA_MAX_DIM = [512]
-LISTA_N_NODES = [25,50]
+LISTA_MAX_DIM = [1024]
+LISTA_N_NODES = [25, 50, 100, 200]
 
 
 def pre_processar_imagem(caminho_final_encontrado, max_dim):
@@ -119,10 +119,15 @@ def processar_linha(args):
         if img_processada is None:
             return None
         
-        h_feat, edges, edge_feat, pos, graph_idx, reduced_idx, n_graphs = MG_superpixel_hierarchy(
-            img_processada, n_nodes=n_nodes
-        )
-        
+        if TIPO_SEGMENTAÇÃO.upper() == "SLIC":
+            h_feat, edges, edge_feat, pos, graph_idx, reduced_idx, n_graphs = MG_superpixel_hierarchy(
+                img_processada, n_nodes=n_nodes
+            )
+        elif TIPO_SEGMENTAÇÃO.upper() == "DISF":
+            h_feat, edges, edge_feat, pos, graph_idx, reduced_idx, n_graphs = MG_superpixel_hierarchy_DISF(
+                img_processada, n_nodes=n_nodes
+            ) 
+
         # Cria o objeto de dados final
         data = MultiGraphData(
             x=torch.from_numpy(h_feat).type(torch.FloatTensor),

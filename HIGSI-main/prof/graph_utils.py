@@ -17,10 +17,6 @@ from skimage.measure import find_contours, regionprops, label
 # Importação direta do DISF, agora que está instalado no venv
 try:
     import disf
-    if hasattr(disf, 'compute_superpixels'):
-        print("Atributo 'compute_superpixels' encontrado no módulo 'disf'.")
-    else:
-        print("Atributo 'compute_superpixels' NÃO encontrado no módulo 'disf'.")
 except ImportError as e:
     print(f"ERRO: Não foi possível importar o módulo 'disf'")
     print(f"Detalhes do erro: {e}")
@@ -610,3 +606,198 @@ def MG_superpixel_hierarchy(image, n_nodes, canonized=True):
     return h, edges.T, edge_features, h[:,3:], graph_index, np.zeros(graph_count), np.array([graph_count])
 
 
+def MG_superpixel_hierarchy_DISF(image, n_nodes, canonized=True):
+    """
+    Gera a hierarquia de superpixels Multi-Graph (MG) usando o 
+    algoritmo DISF para a segmentação inicial, em vez do SLIC.
+    """
+    NUM_FEATURES=104 
+
+    if disf is None:
+        raise RuntimeError("O módulo DISF não foi carregado corretamente.")
+
+    image_int32 = image.astype(np.int32)
+    
+    num_sementes_inicial = max(n_nodes * 2, 200) 
+    
+    super_pixel, _ = disf.DISF_Superpixels(
+        image_int32,
+        num_sementes_inicial,
+        n_nodes 
+    )
+
+    label_img = super_pixel
+    
+    asegments = np.array(label_img) + 1
+
+    image_features = image
+
+    g = graph.rag_mean_color(image, asegments)
+
+    greyscale_image = cv2.cvtColor(image, cv2.COLOR_RGB2GRAY)
+    img_blur = cv2.GaussianBlur(greyscale_image, (3,3), sigmaX=0, sigmaY=0) 
+    canny = cv2.Canny(image=img_blur, threshold1=100, threshold2=200) 
+    
+    superpixel_graph = hg.UndirectedGraph()       
+    superpixel_graph.add_vertices(max(g._node))   
+    edge_list = list(g.edges())                   
+    for i in range (len(edge_list)):
+        superpixel_graph.add_edge(edge_list[i][0]-1, edge_list[i][1]-1) 
+    edge_weights = np.empty(shape=len(edge_list))
+    sources, targets = superpixel_graph.edge_list() 
+    for i in range (len(sources)):
+ 
+        edge_weights[i] = int(g.adj[sources[i]+1][targets[i]+1]["weight"])
+
+    if(not canonized):
+        nb_tree, nb_altitudes = hg.watershed_hierarchy_by_area(superpixel_graph, edge_weights, canonize_tree=False)
+        tree, node_map = hg.tree_2_binary_tree(nb_tree)
+        altitudes = nb_altitudes[node_map]
+    else:
+        nb_tree, nb_altitudes = hg.watershed_hierarchy_by_area(superpixel_graph, edge_weights, canonize_tree=True)
+        tree = nb_tree
+        altitudes = nb_altitudes
+
+    n_edges = tree.root()
+    num_nodes = np.max(tree.root()+1) 
+    nodes = {
+        node: {
+            "rgb_list": [],
+            "pos_list": [],
+            "altitude": 0,
+            "histogram": np.zeros((8,)),
+            "props_features": np.zeros((22,)),
+            "texture_features": np.zeros((68,)),
+            "regions": [],
+            "adj":[],
+        } for node in range(num_nodes)
+    }
+    height = image.shape[0] 
+    width = image.shape[1]  
+    mask_n=0
+    
+    for y in range(height):
+        for x in range(width):
+            node = asegments[y,x]-1 
+            rgb = image_features[y,x,:]
+            pos = np.array([float(x),float(y)])
+            nodes[node]["rgb_list"].append(rgb) 
+            nodes[node]["pos_list"].append(pos)
+            
+    for n in tree.leaves_to_root_iterator(): 
+        if(not tree.is_leaf(n)): 
+            nodes[n]["altitude"] = altitudes[n]
+            for i in tree.children(n): 
+                nodes[n]["rgb_list"].extend(nodes[i]["rgb_list"]) 
+                nodes[n]["pos_list"].extend(nodes[i]["pos_list"]) 
+                nodes[n]["histogram"] += nodes[i]["histogram"]         
+                nodes[n]["regions"].extend(list(set(nodes[i]["regions"]) - set(nodes[n]["regions"])))
+                nodes[n]["adj"].extend(list(set(nodes[i]["adj"]) - set(nodes[n]["adj"])))
+            
+            mask = np.zeros(asegments.shape)
+            for j in nodes[n]["regions"]: 
+                mask += np.where(asegments==j, 255, 0)
+            
+            try:
+                nodes[n]["texture_features"] = texture_features(greyscale_image, mask, canny)
+                nodes[n]["props_features"] = mask_to_bbox(mask, image_features, mask_n, False)
+            except (ValueError, IndexError): 
+                nodes[n]["texture_features"] = np.zeros((68,))
+                nodes[n]["props_features"] = np.zeros((22,))
+            mask_n+=1
+        else: # Nó folha
+            nodes[n]["altitude"] = altitudes[n]
+            
+            try:
+                mask_leaf = np.where(asegments==n+1, 255, 0) 
+                nodes[n]["histogram"] = get_histogram(image_features, mask_leaf)
+                nodes[n]["props_features"] = mask_to_bbox(mask_leaf, image_features, mask_n, False)
+                nodes[n]["texture_features"] = texture_features(greyscale_image, mask_leaf, canny)
+            except (ValueError, IndexError): 
+                nodes[n]["histogram"] = np.zeros((8,))
+                nodes[n]["props_features"] = np.zeros((22,))
+                nodes[n]["texture_features"] = np.zeros((68,))
+
+            nodes[n]["regions"].extend([n+1]) 
+            nodes[n]["adj"].extend(list(g.adj[n+1].keys())) 
+            mask_n+=1
+            
+    h = np.zeros([num_nodes,NUM_FEATURES]).astype(NP_TORCH_FLOAT_DTYPE)
+    G = nx.Graph()
+    
+    for node in nodes:
+        nodes[node]["rgb_list"] = np.stack(nodes[node]["rgb_list"])
+        nodes[node]["pos_list"] = np.stack(nodes[node]["pos_list"])
+        rgb_mean = np.mean(nodes[node]["rgb_list"], axis=0) 
+        pos_mean = np.mean(nodes[node]["pos_list"], axis=0)
+        
+        features = np.concatenate(
+        [
+            np.reshape(rgb_mean, -1),   
+            nodes[node]["histogram"],   
+            np.reshape(nodes[node]["altitude"],-1), 
+            np.reshape(pos_mean, -1),   
+            nodes[node]["texture_features"], 
+            nodes[node]["props_features"],   
+        ]
+        ) 
+        G.add_node(node, features = list(features))
+
+    for j in G.nodes:
+        h[j,:] = G.nodes[j]["features"]
+    del G
+    
+    i=0       
+    graph_index = np.zeros([len(nodes)]).astype(NP_TORCH_LONG_DTYPE)
+    edges_rag = len(list(g.edges()))
+    edges = np.zeros([(2*(n_edges)) + (2*edges_rag),2]).astype(NP_TORCH_LONG_DTYPE)
+    edge_features = np.zeros((edges.shape[0],1)).astype(NP_TORCH_FLOAT_DTYPE)    
+    
+
+    for e,(s,t) in enumerate(edge_list):
+        graph_index[s-1]=0
+        graph_index[t-1]=0 
+        dist=np.linalg.norm(h[s-1]-h[t-1])
+        edges[i,0] = s-1 
+        edges[i,1] = t-1 
+        edge_features[i] = dist
+        i=i+1
+        edges[i,0] = t-1 
+        edges[i,1] = s-1 
+        edge_features[i] = dist
+        i=i+1    
+                                                        
+    for n in tree.leaves_to_root_iterator(): 
+        if(n != tree.root()):     
+            dist = np.linalg.norm(h[n] - h[tree.parent(n)])
+            edges[i,0] = n                                      
+            edges[i,1] = tree.parent(n) 
+            edge_features[i] = dist                      
+            i=i+1                                               
+            edges[i,0] = tree.parent(n)                         
+            edges[i,1] = n
+            edge_features[i] = dist                                     
+            i=i+1
+            
+
+    graph_count=1
+    explorer = hg.HorizontalCutExplorer(tree, altitudes)
+    cut_edges = np.zeros([1,2]).astype(NP_TORCH_LONG_DTYPE)
+    for z in range(explorer.num_cuts()): 
+        cut_nodes = explorer.horizontal_cut_from_index(z).nodes() 
+        for v in cut_nodes:
+            if(graph_index[v]==0):
+                graph_index[v]=graph_count
+        graph_count+=1
+        if(len(cut_nodes)>1):
+            for i in range (len(cut_nodes)):
+                for j in range (len(cut_nodes)-(i+1)):
+
+                    if(any(x in nodes[cut_nodes[i]]["adj"] for x in nodes[cut_nodes[j+(i+1)]]["regions"])):
+                        dist = np.array([[np.linalg.norm(h[cut_nodes[i]] - h[cut_nodes[j+(i+1)]])]]).astype(NP_TORCH_FLOAT_DTYPE)
+                        edges = np.append(edges, np.array([[cut_nodes[i],cut_nodes[j+(i+1)]]]).astype(NP_TORCH_LONG_DTYPE), axis=0)
+                        edge_features = np.append(edge_features, dist, axis=0)
+                        edges = np.append(edges, np.array([[cut_nodes[j+(i+1)],cut_nodes[i]]]).astype(NP_TORCH_LONG_DTYPE), axis=0)
+                        edge_features = np.append(edge_features, dist, axis=0)
+                        
+    return h, edges.T, edge_features, h[:,3:], graph_index, np.zeros(graph_count), np.array([graph_count])

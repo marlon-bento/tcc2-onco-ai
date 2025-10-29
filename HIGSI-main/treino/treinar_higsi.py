@@ -22,7 +22,7 @@ from decouple import config
 # Escolha o tipo de lesão: "MASS" ou "CALC"
 TIPO_LESÃO = "MASS" 
 # Escolha o tipo de segmentação/grafo: "SLIC" ou "DISF"
-TIPO_SEGMENTAÇÃO = "SLIC" 
+TIPO_SEGMENTAÇÃO = "DISF" 
 
 PASTA_FEATURES_MASS_SLIC = config("PASTA_FEATURES_MASS_HIGSI_SLIC")
 PASTA_FEATURES_MASS_DISF = config("PASTA_FEATURES_MASS_HIGSI_DISF")
@@ -54,8 +54,8 @@ if not PASTA_FEATURES:
 # ==============================================================================
 # --- PAINEL DE CONTROLE DO EXPERIMENTO ---
 # ==============================================================================
-MAX_DIM_A_TESTAR = 512
-N_NODES_A_TESTAR = 50 
+MAX_DIM_A_TESTAR = 1024
+N_NODES_A_TESTAR = 25 
 
 EPOCHS = 150
 BATCH_SIZE = 16
