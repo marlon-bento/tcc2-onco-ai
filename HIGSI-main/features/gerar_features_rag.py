@@ -61,7 +61,7 @@ if not ARQUIVO_MANIFEST or not DATASET_IMAGES_PATH or not PASTA_FEATURES:
 NUM_WORKERS = 4
 
 LISTA_MAX_DIM = [1024]
-LISTA_N_NODES = [25]
+LISTA_N_NODES = [5]
 
 
 def pre_processar_imagem(caminho_final_encontrado, max_dim):
@@ -117,7 +117,7 @@ def processar_e_gerar_grafo(args):
         
         if TIPO_SEGMENTAÇÃO.upper() == "SLIC":
             # Gera o grafo
-            h_feat, edges, edge_feat, _, _ = RAG(img_processada, n_nodes=n_nodes)
+            h_feat, edges, edge_feat, _ = RAG(img_processada, n_nodes=n_nodes)
         elif TIPO_SEGMENTAÇÃO.upper() == "DISF":
             h_feat, edges, edge_feat, _, _ = RAG_DISF(img_processada, n_nodes=n_nodes)
         else:

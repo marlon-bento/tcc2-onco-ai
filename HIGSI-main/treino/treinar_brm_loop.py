@@ -114,7 +114,7 @@ param_grid = {
     'TIPO_LESÃO': ["CALC", "MASS"],
     'TIPO_SEGMENTAÇÃO': ["SLIC", "DISF"], 
     'MAX_DIM_A_TESTAR': [1024],
-    'N_NODES_A_TESTAR': [25],
+    'N_NODES_A_TESTAR': [100],
     'LEARNING_RATE': [1e-3, 5e-4],
     'WEIGHT_DECAY': [5e-4, 1e-3],
     'EMBEDDING_SIZE': [128],

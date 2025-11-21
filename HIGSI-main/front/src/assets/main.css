@@ -1,0 +1,45 @@
+@import url('https://rsms.me/inter/inter.css');
+@import './v-required-style.css';
+:root {
+    --tblr-font-sans-serif: 'Inter Var', -apple-system, BlinkMacSystemFont, San Francisco, Segoe UI, Roboto, Helvetica Neue, sans-serif;
+    --cor-modal: #ffffff; /* Padrão para tema claro */
+}
+
+[data-bs-theme="dark"] {
+    --cor-modal: #000000;
+}
+[data-bs-theme="light"] {
+    --cor-modal: #ffffff;
+}
+*{
+  box-sizing: border-box !important; 
+}
+body {
+    font-feature-settings: "cv03", "cv04", "cv11";
+    
+}
+
+.hidden {
+    display: none;
+}
+
+.input-icon-addon {
+    cursor: pointer;
+}
+
+
+.bold{
+    font-weight: bold;
+}
+.bg-fundo{
+    height: 100vh;
+}
+
+[data-bs-theme=dark] .bg-fundo {
+    background: linear-gradient(to bottom, #0F123B, #090D2E, #020515) !important;
+    height: 100vh;
+}
+
+
+
+

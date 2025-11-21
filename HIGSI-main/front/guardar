@@ -1,0 +1,150 @@
+<script setup>
+    import logo from '@/assets/static/imgs/logo_crc_2.png';
+    import { ref, onMounted } from 'vue';
+    import { useThemeStore } from "@/stores/ThemeStore";
+    import { useLoginStore } from '@/stores/LoginStore.js';
+    
+    const login = useLoginStore()
+    
+    
+    
+    const theme = useThemeStore();
+    
+    
+    const username_input = ref('')
+    const password_input = ref('')
+    
+    const usernameEmpty = ref(false)
+    const passwordEmpty = ref(false)
+    const erroLogin = ref(false)
+    
+    async function loginMetod(){
+        if(username_input.value && password_input.value){
+            usernameEmpty.value = false
+            passwordEmpty.value = false
+            const dataObject={
+                username: username_input.value,
+                password: password_input.value
+            }
+            console.log(dataObject)
+            try{
+                await login.loginAction(dataObject)
+            }catch(e){
+                window.alert(e)
+                erroLogin.value = true
+            }
+           
+        }else{
+            if(username_input.value){
+                usernameEmpty.value = true
+                passwordEmpty.value = true
+            }
+        }
+    }
+    </script>
+    <template>
+    
+        <section class="body d-flex flex-column">
+            <div class="container container-normal py-4">
+                <div class="text-center mb-4">
+                    <img :src="logo" alt="Tabler" class="logo">
+                </div>
+                <div class="row align-items-center g-4">
+                    <div class="col-lg">
+                        <div class="container-tight">
+                            <div class="card card-md">
+                                <div class="card-body">
+                                    <div class="d-none d-md-flex" style="position: absolute; right: 10%; top: 12%;">
+    
+                                        <!-- Botão para mudar para o tema escuro -->
+                                        <button  class="nav-link px-0 hide-theme-dark"
+                                            title="Habilitar modo escuro" data-bs-toggle="tooltip"
+                                            data-bs-placement="bottom" @click="theme.setTheme('dark')">
+                                            <span v-html="svgs.darkThemeIcon"></span>
+                                        </button>
+    
+                                        <!-- Botão para mudar para o tema claro -->
+                                        <button  class="nav-link px-0 hide-theme-light"
+                                            title="Habilitar modo claro" data-bs-toggle="tooltip" data-bs-placement="bottom"
+                                            @click="theme.setTheme('light')">
+                                            <span v-html="svgs.lightThemeIcon"></span>
+                                        </button>
+    
+                                    </div>
+                                    <h2 class="h2 text-center mb-4">Sistema de Laudos</h2>
+                                    <form id="form" method="post" autocomplete="off" novalidate>
+                                       
+                                        <div class="mb-3">
+                                            <label class="form-label">Nome Usuário</label>
+                                            <input v-model="username_input" id="username" type="text"
+                                                class="form-control" :class="usernameEmpty ? 'is-invalid' : ''"
+                                                name="username" placeholder="Nome" autocomplete="off" required>
+                                                <div v-if="usernameEmpty" class="invalid-feedback"> Usuário não digitado
+                                            </div> 
+                                        </div>
+                                        <div class="mb-2">
+                                            <label class="form-label">
+                                                Senha
+                                            </label>
+                                            <div class="input-group input-group-flat">
+                                                <input v-model="password_input" type="password" id="senha"
+                                                    class="form-control" :class="passwordEmpty ? 'is-invalid' : ''"
+                                                    name="password" placeholder="Senha" autocomplete="off" required>
+                                                <span class="input-group-text"
+                                                    style="cursor: pointer;"
+                                                    
+                                                    :style ="passwordEmpty ? ' border-color: #e68888;' : ''"
+                                                    
+                                                    >
+                                                   
+                                                    <a class="link-secondary" title="Show password"
+                                                        data-bs-toggle="tooltip"><!-- Download SVG icon from http://tabler-icons.io/i/eye -->
+                                                        <span v-html="svgs.viewPasswordIcon"></span>
+                                                    </a>
+                                                </span>
+                                                <div  class="invalid-feedback"> Senha não
+                                                    digitada</div> 
+                                            </div>
+                                        </div>
+                                       
+                                        <div v-if="erroLogin" class="form-footer">
+                                            <span class="badge bg-red-lt w-100" style="height: 50px; padding:20px;">Usuario
+                                                ou senha invalidos, repita o processo</span>
+                                        </div>
+                                        
+                                        <div class="form-footer">
+                                            <button type="submit" class="btn btn-primary w-100">Entrar</button>
+                                        </div>
+                                    </form>
+                                </div>
+                                <div class="hr-text">ou</div>
+                                <div class="card-body">
+                                    <p>Problemas ao fazer login? clique no link <a
+                                            href="https://csc.pucminas.br/Login.aspx">Suporte</a></p>
+                                </div>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+            </div>
+            
+        </section>
+    
+    </template>
+    <style scoped>
+    :root {
+        --tblr-font-sans-serif: 'Inter Var', -apple-system, BlinkMacSystemFont, San Francisco, Segoe UI, Roboto, Helvetica Neue, sans-serif;
+    }
+    
+    .body {
+        font-feature-settings: "cv03", "cv04", "cv11";
+    }
+    
+    .logo {
+        width: 20em;
+    }
+    
+    [data-bs-theme=dark] .logo {
+        filter: invert(85%) !important;
+    }
+    </style>

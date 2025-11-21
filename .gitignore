@@ -7,3 +7,8 @@ HIGSI-main/.venv
 **/weights/**
 .venv/
 **/mlruns/**
+media/
+node_modules/
+
+
+

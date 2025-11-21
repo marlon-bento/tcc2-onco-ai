@@ -24,7 +24,7 @@ from decouple import config
 # Escolha o tipo de lesão: "MASS" ou "CALC"
 TIPO_LESÃO = "CALC" 
 # Escolha o tipo de segmentação/grafo: "SLIC" ou "DISF"
-TIPO_SEGMENTAÇÃO = "DISF" 
+TIPO_SEGMENTAÇÃO = "SLIC" 
 
 PASTA_FEATURES_MASS_SLIC = config("PASTA_FEATURES_MASS_SLIC")
 PASTA_FEATURES_MASS_DISF = config("PASTA_FEATURES_MASS_DISF")
@@ -59,7 +59,7 @@ if not PASTA_FEATURES:
 # ==============================================================================
 # conjunto de features
 MAX_DIM_A_TESTAR = 1024
-N_NODES_A_TESTAR = 25  
+N_NODES_A_TESTAR = 200
 
 # Parâmetros de Treinamento
 EPOCHS = 90
@@ -147,7 +147,7 @@ def salva_modelo_treinado(dim_folder_name):
     save_dir = os.path.join(
         diretorio_do_script, 
         "weights", 
-        f"BRM_{dim_folder_name}_{N_NODES_A_TESTAR}_seed{RANDOM_SEED}.pth"
+        f"BRM_{dim_folder_name}_{N_NODES_A_TESTAR}_{TIPO_SEGMENTAÇÃO}_{TIPO_LESÃO}.pth"
     )
 
     os.makedirs(os.path.dirname(save_dir), exist_ok=True)
@@ -163,9 +163,10 @@ def resgata_dados_treinamento(dim_folder_name):
     print("Iniciando Experimento com MLFlow")
     print(f"  - Carregando features de: {ARQUIVO_GRAFOS_PRONTOS}")
     return torch.load(ARQUIVO_GRAFOS_PRONTOS, weights_only=False)
-def normalizar_features(lista_grafos):
-    from sklearn.preprocessing import StandardScaler
 
+def normalizar_features(lista_grafos, dim_folder_name):
+    from sklearn.preprocessing import StandardScaler
+    import joblib
     # --- NORMALIZAÇÃO DE FEATURES ---
     print("Normalizando as features dos nós...")
 
@@ -174,6 +175,14 @@ def normalizar_features(lista_grafos):
     scaler = StandardScaler()
     scaler.fit(all_node_features.numpy())
 
+    # Salva o scaler para uso futuro no mesmo lugar dos pesos do modelo
+    diretorio_do_script = os.path.dirname(os.path.abspath(__file__))
+    caminho_scaler = os.path.join(diretorio_do_script, "weights", f"scaler_{dim_folder_name}_{N_NODES_A_TESTAR}_{TIPO_SEGMENTAÇÃO}_{TIPO_LESÃO}.joblib")
+    os.makedirs(os.path.dirname(caminho_scaler), exist_ok=True)
+    joblib.dump(scaler, caminho_scaler)
+
+    print(f"Scaler salvo em {caminho_scaler}")
+    # -----------------------
     for data in lista_grafos:
         data.x = torch.from_numpy(scaler.transform(data.x.numpy())).float()
     print("Normalização concluída.")
@@ -203,7 +212,7 @@ def main():
     lista_grafos = resgata_dados_treinamento(dim_folder_name)
     
 
-    lista_grafos = normalizar_features(lista_grafos)
+    lista_grafos = normalizar_features(lista_grafos, dim_folder_name)
 
     print(lista_grafos[0])
     try:
